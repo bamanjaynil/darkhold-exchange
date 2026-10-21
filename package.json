@@ -1,0 +1,16 @@
+{
+  "name": "darkhold-exchange",
+  "private": true,
+  "packageManager": "pnpm@12.11.1",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f",
+    "build": "pnpm -r --if-present run build",
+    "test": "pnpm -r --if-present run test",
+    "lint": "pnpm -r --if-present run lint"
+  }
+}
