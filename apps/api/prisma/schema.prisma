@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AccountType {
+  USER_AVAILABLE
+  USER_LOCKED
+  ESCROW_VAULT
+  PLATFORM_FEE_REVENUE
+  SYSTEM_MINT
+}
+
+model User {
+  id               String    @id
+  username         String    @unique
+  publicKeyEd25519 String
+  merkleNonce      String    @default(uuid())
+  accounts         Account[]
+}
+
+model Account {
+  id          String        @id @default(uuid())
+  userId      String?
+  user        User?         @relation(fields: [userId], references: [id])
+  type        AccountType
+  balance     BigInt        @default(0)
+  debitLines  LedgerEntry[] @relation("DebitAccount")
+  creditLines LedgerEntry[] @relation("CreditAccount")
+
+  @@unique([userId, type])
+}
+
+model LedgerEntry {
+  id               String   @id @default(uuid())
+  transactionGroup String
+  debitAccountId   String
+  creditAccountId  String
+  debitAccount     Account  @relation("DebitAccount", fields: [debitAccountId], references: [id])
+  creditAccount    Account  @relation("CreditAccount", fields: [creditAccountId], references: [id])
+  amount           BigInt
+  referenceType    String
+  referenceId      String
+  createdAt        DateTime @default(now())
+}
+
+model Market {
+  id             String   @id
+  symbol         String   @unique
+  title          String
+  faceValue      BigInt
+  minCollarBps   Int      @default(5000)
+  maxCollarBps   Int      @default(12000)
+  eventTimestamp DateTime
+}
+
+model Trade {
+  id           String   @id @default(uuid())
+  marketId     String
+  buyOrderId   String
+  sellOrderId  String
+  buyerId      String
+  sellerId     String
+  price        BigInt
+  quantity     Int
+  escrowStatus String   @default("VERIFIED_RELEASED")
+  executedAt   DateTime @default(now())
+}
