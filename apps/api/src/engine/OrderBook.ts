@@ -1,4 +1,4 @@
-import { L2Level } from '@darkhold/shared';
+import { L2Level, OpenOrderItem } from '@darkhold/shared';
 
 export interface OrderNode {
   id: string;
@@ -6,7 +6,7 @@ export interface OrderNode {
   marketId: string;
   side: 'BUY' | 'SELL';
   type: 'LIMIT' | 'MARKET';
-  timeInForce: 'GTC' | 'IOC';
+  timeInForce: 'GTC' | 'IOC' | 'FOK';
   price: bigint;
   initialQty: number;
   remainingQty: number;
@@ -17,6 +17,7 @@ export interface OrderNode {
 }
 
 export interface MatchedTrade {
+  id: string;
   buyOrderId: string;
   sellOrderId: string;
   buyerId: string;
@@ -24,6 +25,7 @@ export interface MatchedTrade {
   marketId: string;
   price: bigint;
   quantity: number;
+  aggressorSide: 'BUY' | 'SELL';
   buyerRefund: bigint;
 }
 
@@ -63,12 +65,65 @@ export class LimitOrderBook {
   private orderMap = new Map<string, OrderNode>();
   public seqId = 1;
 
+  // Pre-check available liquidity for Fill-Or-Kill (FOK) orders
+  private canFillCompletely(incoming: OrderNode): boolean {
+    let needed = incoming.remainingQty;
+    if (incoming.side === 'BUY') {
+      const sortedAskPrices = [...this.asks.keys()].sort((a, b) => (a < b ? -1 : 1));
+      for (const askPrice of sortedAskPrices) {
+        if (incoming.type === 'LIMIT' && incoming.price < askPrice) break;
+        const level = this.asks.get(askPrice)!;
+        let cur = level.head;
+        while (cur) {
+          if (cur.userId !== incoming.userId) needed -= cur.remainingQty;
+          if (needed <= 0) return true;
+          cur = cur.next;
+        }
+      }
+    } else {
+      const sortedBidPrices = [...this.bids.keys()].sort((a, b) => (a > b ? -1 : 1));
+      for (const bidPrice of sortedBidPrices) {
+        if (incoming.type === 'LIMIT' && incoming.price > bidPrice) break;
+        const level = this.bids.get(bidPrice)!;
+        let cur = level.head;
+        while (cur) {
+          if (cur.userId !== incoming.userId) needed -= cur.remainingQty;
+          if (needed <= 0) return true;
+          cur = cur.next;
+        }
+      }
+    }
+    return needed <= 0;
+  }
+
+  public cancelOrder(orderId: string): OrderNode | null {
+    const node = this.orderMap.get(orderId);
+    if (!node) return null;
+    const bookSide = node.side === 'BUY' ? this.bids : this.asks;
+    const level = bookSide.get(node.price);
+    if (level) {
+      level.remove(node);
+      if (level.orderCount === 0) bookSide.delete(node.price);
+    }
+    this.orderMap.delete(orderId);
+    this.seqId++;
+    return node;
+  }
+
   public processOrder(incoming: OrderNode): {
     trades: MatchedTrade[];
     cancelledQty: number;
     refundedCash: bigint;
   } {
     this.seqId++;
+    if (incoming.timeInForce === 'FOK' && !this.canFillCompletely(incoming)) {
+      const cancelledQty = incoming.remainingQty;
+      const refundedCash = incoming.lockedCash;
+      incoming.remainingQty = 0;
+      incoming.lockedCash = 0n;
+      return { trades: [], cancelledQty, refundedCash };
+    }
+
     const trades: MatchedTrade[] = [];
 
     if (incoming.side === 'BUY') {
@@ -82,7 +137,6 @@ export class LimitOrderBook {
 
         while (resting && incoming.remainingQty > 0) {
           const nextResting = resting.next;
-          // Self-Trade Prevention (Cancel resting order if same user)
           if (resting.userId === incoming.userId) {
             level.remove(resting);
             this.orderMap.delete(resting.id);
@@ -100,6 +154,7 @@ export class LimitOrderBook {
           level.totalVolume -= matchQty;
 
           trades.push({
+            id: `trd_${this.seqId}_${trades.length}`,
             buyOrderId: incoming.id,
             sellOrderId: resting.id,
             buyerId: incoming.userId,
@@ -107,6 +162,7 @@ export class LimitOrderBook {
             marketId: incoming.marketId,
             price: execPrice,
             quantity: matchQty,
+            aggressorSide: 'BUY',
             buyerRefund: buyerRefund > 0n ? buyerRefund : 0n
           });
 
@@ -136,7 +192,6 @@ export class LimitOrderBook {
         return { trades, cancelledQty, refundedCash };
       }
     } else {
-      // SELL side matching against highest Bids first
       const sortedBidPrices = [...this.bids.keys()].sort((a, b) => (a > b ? -1 : a < b ? 1 : 0));
       for (const bidPrice of sortedBidPrices) {
         if (incoming.remainingQty <= 0) break;
@@ -163,6 +218,7 @@ export class LimitOrderBook {
           level.totalVolume -= matchQty;
 
           trades.push({
+            id: `trd_${this.seqId}_${trades.length}`,
             buyOrderId: resting.id,
             sellOrderId: incoming.id,
             buyerId: resting.userId,
@@ -170,6 +226,7 @@ export class LimitOrderBook {
             marketId: incoming.marketId,
             price: execPrice,
             quantity: matchQty,
+            aggressorSide: 'SELL',
             buyerRefund: 0n
           });
 
@@ -199,19 +256,50 @@ export class LimitOrderBook {
     }
   }
 
-  public getL2Depth(limit = 15): { bids: L2Level[]; asks: L2Level[] } {
+  public getL2Depth(limit = 12): { bids: L2Level[]; asks: L2Level[] } {
     const bidPrices = [...this.bids.keys()].sort((a, b) => (a > b ? -1 : 1)).slice(0, limit);
     const askPrices = [...this.asks.keys()].sort((a, b) => (a < b ? -1 : 1)).slice(0, limit);
 
-    return {
-      bids: bidPrices.map((p) => {
-        const lvl = this.bids.get(p)!;
-        return { priceMicro: p.toString(), quantity: lvl.totalVolume, orderCount: lvl.orderCount };
-      }),
-      asks: askPrices.map((p) => {
-        const lvl = this.asks.get(p)!;
-        return { priceMicro: p.toString(), quantity: lvl.totalVolume, orderCount: lvl.orderCount };
-      })
-    };
+    let cumBid = 0;
+    const bids = bidPrices.map((p) => {
+      const lvl = this.bids.get(p)!;
+      cumBid += lvl.totalVolume;
+      return {
+        priceMicro: p.toString(),
+        quantity: lvl.totalVolume,
+        cumulativeQuantity: cumBid,
+        orderCount: lvl.orderCount
+      };
+    });
+
+    let cumAsk = 0;
+    const asks = askPrices.map((p) => {
+      const lvl = this.asks.get(p)!;
+      cumAsk += lvl.totalVolume;
+      return {
+        priceMicro: p.toString(),
+        quantity: lvl.totalVolume,
+        cumulativeQuantity: cumAsk,
+        orderCount: lvl.orderCount
+      };
+    });
+
+    return { bids, asks };
+  }
+
+  public getOpenOrders(limit = 8): OpenOrderItem[] {
+    const items: OpenOrderItem[] = [];
+    for (const node of this.orderMap.values()) {
+      items.push({
+        id: node.id,
+        userId: node.userId,
+        side: node.side,
+        priceMicro: node.price.toString(),
+        remainingQty: node.remainingQty,
+        initialQty: node.initialQty
+      });
+      if (items.length >= limit) break;
+    }
+    return items;
   }
 }
