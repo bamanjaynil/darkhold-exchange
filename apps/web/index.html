@@ -3,9 +3,190 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>07 // THE DARKHOLD EXCHANGE</title>
+    <title>Darkhold Exchange | Terminal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+      :root {
+        --obsidian: #0A0C10;
+        --charcoal: #12151C;
+        --surface: #1A1E27;
+        --surface-hover: #232936;
+        --border: #242A35;
+        --border-light: #323A48;
+        --text-main: #F8FAFC;
+        --text-silver: #94A3B8;
+        --text-dim: #64748B;
+        --cyan: #00E5FF;
+        --emerald: #10B981;
+        --coral: #F43F5E;
+        --amber: #F59E0B;
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: var(--obsidian);
+        color: var(--text-main);
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        font-size: 13px;
+        line-height: 1.4;
+        -webkit-font-smoothing: antialiased;
+        height: 100vh;
+        overflow: hidden;
+      }
+      .mono {
+        font-family: 'JetBrains Mono', monospace;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: -0.02em;
+      }
+      .text-cyan { color: var(--cyan); }
+      .text-emerald { color: var(--emerald); }
+      .text-coral { color: var(--coral); }
+      .text-amber { color: var(--amber); }
+      .text-silver { color: var(--text-silver); }
+      .text-dim { color: var(--text-dim); }
+      
+      .bg-emerald-dim { background: rgba(16, 185, 129, 0.1); }
+      .bg-coral-dim { background: rgba(244, 63, 94, 0.1); }
+      
+      /* Reset & Utilities */
+      button, input { font-family: inherit; border: none; outline: none; }
+      
+      /* Layout & Components */
+      .app-layout {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        padding: 8px;
+        gap: 8px;
+      }
+      .top-nav {
+        background: var(--charcoal);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 8px 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-shrink: 0;
+      }
+      .grid-workspace {
+        display: grid;
+        grid-template-columns: 280px 300px 1fr 340px;
+        gap: 8px;
+        flex: 1;
+        min-height: 0;
+      }
+      
+      /* Responsive fallback for smaller laptops */
+      @media (max-width: 1300px) {
+        .grid-workspace {
+          grid-template-columns: 260px 280px 1fr 280px;
+        }
+      }
+      
+      .panel {
+        background: var(--charcoal);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .panel-header {
+        background: var(--surface);
+        padding: 8px 12px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        color: var(--text-silver);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        letter-spacing: 0.05em;
+        flex-shrink: 0;
+      }
+      .panel-body {
+        padding: 12px;
+        overflow-y: auto;
+        flex: 1;
+      }
+      .panel-body.no-pad { padding: 0; }
+      
+      .btn {
+        background: var(--surface);
+        color: var(--text-main);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 6px 12px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.1s ease;
+      }
+      .btn:hover:not(:disabled) {
+        background: var(--surface-hover);
+        border-color: var(--border-light);
+      }
+      .btn:active:not(:disabled) { transform: translateY(1px); }
+      .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      
+      .btn-primary { background: rgba(0, 229, 255, 0.1); border-color: var(--cyan); color: var(--cyan); }
+      .btn-primary:hover:not(:disabled) { background: rgba(0, 229, 255, 0.2); }
+      .btn-emerald-solid { background: var(--emerald); color: var(--obsidian); border-color: var(--emerald); font-weight: 600; }
+      .btn-coral-solid { background: var(--coral); color: var(--obsidian); border-color: var(--coral); font-weight: 600; }
+      
+      .input-field {
+        background: var(--obsidian);
+        border: 1px solid var(--border);
+        color: var(--text-main);
+        padding: 8px 10px;
+        border-radius: 3px;
+        width: 100%;
+        transition: border-color 0.2s;
+      }
+      .input-field:focus { border-color: var(--cyan); }
+      
+      .form-group { margin-bottom: 12px; }
+      .form-label { display: block; font-size: 11px; color: var(--text-silver); margin-bottom: 4px; font-weight: 500; }
+      
+      .data-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; }
+      
+      /* Tables */
+      .data-table { width: 100%; border-collapse: collapse; }
+      .data-table th {
+        position: sticky;
+        top: 0;
+        background: var(--surface);
+        font-size: 10px;
+        color: var(--text-dim);
+        font-weight: 500;
+        text-transform: uppercase;
+        text-align: right;
+        padding: 4px 12px;
+        border-bottom: 1px solid var(--border);
+        z-index: 10;
+      }
+      .data-table th:first-child { text-align: left; }
+      .data-table td {
+        padding: 4px 12px;
+        font-size: 12px;
+        text-align: right;
+        border-bottom: 1px solid rgba(255,255,255,0.02);
+      }
+      .data-table td:first-child { text-align: left; }
+      .data-table tbody tr:hover td { background: rgba(255,255,255,0.03); }
+      
+      /* Scrollbars */
+      ::-webkit-scrollbar { width: 4px; height: 4px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 2px; }
+      ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+    </style>
   </head>
-  <body style="margin: 0; background: #0a0a0f; color: #e2e8f0; font-family: system-ui, sans-serif;">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
