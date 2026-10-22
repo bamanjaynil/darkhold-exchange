@@ -3,9 +3,60 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>07 // THE DARKHOLD EXCHANGE</title>
+    <title>DARKHOLD // 取引所</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=Noto+Sans+JP:wght@400;700;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+      :root {
+        --bg-base: #090a0f;
+        --bg-panel: rgba(18, 20, 28, 0.65);
+        --sakura: #ff2a70;
+        --cyan: #00e5ff;
+        --katana: #f1f5f9;
+        --muted: #64748b;
+        --border: rgba(255, 255, 255, 0.08);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background-color: var(--bg-base);
+        background-image: 
+          radial-gradient(circle at 10% 10%, rgba(255, 42, 112, 0.04) 0%, transparent 40%),
+          radial-gradient(circle at 90% 90%, rgba(0, 229, 255, 0.04) 0%, transparent 40%);
+        color: var(--katana);
+        font-family: 'Inter', 'Noto Sans JP', sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .jp-text { font-family: 'Noto Sans JP', sans-serif; font-weight: 900; letter-spacing: 0.1em; }
+      .mono { font-family: 'JetBrains Mono', monospace; }
+      
+      .glass-panel {
+        background: var(--bg-panel);
+        backdrop-filter: blur(16px);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+        transition: border 0.3s ease;
+      }
+      .glass-panel:hover { border: 1px solid rgba(255, 255, 255, 0.15); }
+      
+      .btn-sharp {
+        font-family: 'Inter', sans-serif;
+        font-weight: 700;
+        text-transform: uppercase;
+        border-radius: 4px;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        cursor: pointer;
+      }
+      .btn-sharp:hover { transform: translateY(-2px); filter: brightness(1.15); }
+      
+      ::-webkit-scrollbar { width: 4px; height: 4px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 4px; }
+    </style>
   </head>
-  <body style="margin: 0; background: #0a0a0f; color: #e2e8f0; font-family: system-ui, sans-serif;">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
