@@ -1,0 +1,62 @@
+[
+  {
+    "id": "inst_fest_ga",
+    "symbol": "FEST-GA",
+    "name": "General Admission Festival Pass",
+    "faceValue": 150000,
+    "collarBps": 1000,
+    "tickSize": 100,
+    "minQty": 1,
+    "maxQtyPerOrder": 10,
+    "escrowRequired": false,
+    "isBenchmark": false
+  },
+  {
+    "id": "inst_fest_vip",
+    "symbol": "FEST-VIP",
+    "name": "VIP Sanctum Access Pass",
+    "faceValue": 350000,
+    "collarBps": 1000,
+    "tickSize": 100,
+    "minQty": 1,
+    "maxQtyPerOrder": 5,
+    "escrowRequired": false,
+    "isBenchmark": false
+  },
+  {
+    "id": "inst_relic_agamotto",
+    "symbol": "RELIC-AGAMOTTO",
+    "name": "Eye of Agamotto Amulet",
+    "faceValue": 500000,
+    "collarBps": 1500,
+    "tickSize": 100,
+    "minQty": 1,
+    "maxQtyPerOrder": 2,
+    "escrowRequired": true,
+    "isBenchmark": false
+  },
+  {
+    "id": "inst_merch_cloak",
+    "symbol": "MERCH-CLOAK",
+    "name": "Cloak of Levitation Replica",
+    "faceValue": 80000,
+    "collarBps": 1000,
+    "tickSize": 100,
+    "minQty": 1,
+    "maxQtyPerOrder": 20,
+    "escrowRequired": false,
+    "isBenchmark": false
+  },
+  {
+    "id": "inst_bench_x",
+    "symbol": "BENCH-X",
+    "name": "Synthetic Stress Benchmark Pass",
+    "faceValue": 100000,
+    "collarBps": 5000,
+    "tickSize": 100,
+    "minQty": 1,
+    "maxQtyPerOrder": 100,
+    "escrowRequired": false,
+    "isBenchmark": true
+  }
+]

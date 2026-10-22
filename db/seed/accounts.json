@@ -1,0 +1,63 @@
+[
+  {
+    "id": "usr_admin",
+    "username": "admin",
+    "role": "admin",
+    "isDemo": false,
+    "isSimulated": false,
+    "initialDkc": 5000000,
+    "initialInventory": {
+      "FEST-GA": 100,
+      "FEST-VIP": 50,
+      "RELIC-AGAMOTTO": 20,
+      "MERCH-CLOAK": 200,
+      "BENCH-X": 10000
+    }
+  },
+  {
+    "id": "usr_alice",
+    "username": "alice",
+    "role": "user",
+    "isDemo": true,
+    "isSimulated": false,
+    "initialDkc": 1000000,
+    "initialInventory": {
+      "FEST-GA": 10,
+      "RELIC-AGAMOTTO": 2
+    }
+  },
+  {
+    "id": "usr_bob",
+    "username": "bob",
+    "role": "user",
+    "isDemo": true,
+    "isSimulated": false,
+    "initialDkc": 1500000,
+    "initialInventory": {
+      "FEST-VIP": 5,
+      "MERCH-CLOAK": 10
+    }
+  },
+  {
+    "id": "usr_carol",
+    "username": "carol",
+    "role": "user",
+    "isDemo": true,
+    "isSimulated": false,
+    "initialDkc": 2000000,
+    "initialInventory": {
+      "FEST-GA": 5
+    }
+  },
+  {
+    "id": "usr_bench_bot",
+    "username": "bench_bot",
+    "role": "user",
+    "isDemo": false,
+    "isSimulated": true,
+    "initialDkc": 50000000,
+    "initialInventory": {
+      "BENCH-X": 50000
+    }
+  }
+]

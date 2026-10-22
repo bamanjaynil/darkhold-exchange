@@ -1,0 +1,29 @@
+[
+  {
+    "id": "sim_lp_wong",
+    "username": "sim_wong",
+    "type": "LIQUIDITY_PROVIDER",
+    "spreadBps": 200,
+    "orderQty": 5,
+    "initialDkc": 10000000,
+    "inventory": { "FEST-GA": 50, "FEST-VIP": 20 }
+  },
+  {
+    "id": "sim_retail_mordo",
+    "username": "sim_mordo",
+    "type": "RETAIL_TRADER",
+    "aggression": 0.4,
+    "orderQty": 2,
+    "initialDkc": 5000000,
+    "inventory": { "FEST-GA": 20 }
+  },
+  {
+    "id": "sim_taker_chavez",
+    "username": "sim_chavez",
+    "type": "MARKET_TAKER",
+    "aggression": 0.8,
+    "orderQty": 1,
+    "initialDkc": 5000000,
+    "inventory": {}
+  }
+]

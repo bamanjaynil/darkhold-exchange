@@ -1,0 +1,24 @@
+{
+  "benchmark": "In-Process Pure Matching Engine",
+  "timestamp": "2026-10-22T20:11:54.087Z",
+  "host": {
+    "platform": "linux",
+    "arch": "x64",
+    "cpus": 4,
+    "model": "13th Gen Intel(R) Core(TM) i5-13420H",
+    "nodeVersion": "v24.22.1"
+  },
+  "metrics": {
+    "totalOrders": 50000,
+    "tradesExecuted": 28932,
+    "durationMs": 102.77,
+    "throughputOpsSec": 486533,
+    "latency": {
+      "unit": "microseconds",
+      "p50": 0.67,
+      "p95": 1.94,
+      "p99": 3.02,
+      "max": 10369.66
+    }
+  }
+}
