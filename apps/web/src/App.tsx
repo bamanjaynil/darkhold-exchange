@@ -9,30 +9,23 @@ async function sha256Hex(text: string): Promise<string> {
   return Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// Clean Minimalist SVG Depth Chart
+// Precision Vector Depth Chart (No gradients, sharp strokes)
 function MarketDepthChart({ bids, asks }: { bids: L2Level[]; asks: L2Level[] }) {
-  const width = 420; const height = 120;
+  const width = 280; const height = 100;
   const maxCum = Math.max(bids[bids.length - 1]?.cumulativeQuantity || 1, asks[asks.length - 1]?.cumulativeQuantity || 1, 1);
 
-  const bidPoints = bids.map((b, i) => `${width / 2 - ((i + 1) / Math.max(bids.length, 1)) * (width / 2 - 10)},${height - (b.cumulativeQuantity / maxCum) * (height - 20) - 5}`);
-  const bidPolygon = bids.length > 0 ? `${width / 2},${height - 5} ${bidPoints.join(' ')} 10,${height - 5}` : '';
+  const bidPoints = bids.map((b, i) => `${width / 2 - ((i + 1) / Math.max(bids.length, 1)) * (width / 2)},${height - (b.cumulativeQuantity / maxCum) * height}`);
+  const bidPolygon = bids.length > 0 ? `${width / 2},${height} ${bidPoints.join(' ')} 0,${height}` : '';
 
-  const askPoints = asks.map((a, i) => `${width / 2 + ((i + 1) / Math.max(asks.length, 1)) * (width / 2 - 10)},${height - (a.cumulativeQuantity / maxCum) * (height - 20) - 5}`);
-  const askPolygon = asks.length > 0 ? `${width / 2},${height - 5} ${askPoints.join(' ')} ${width - 10},${height - 5}` : '';
+  const askPoints = asks.map((a, i) => `${width / 2 + ((i + 1) / Math.max(asks.length, 1)) * (width / 2)},${height - (a.cumulativeQuantity / maxCum) * height}`);
+  const askPolygon = asks.length > 0 ? `${width / 2},${height} ${askPoints.join(' ')} ${width},${height}` : '';
 
   return (
-    <div style={{ marginTop: 16, borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#64748b', fontWeight: 700, marginBottom: 8 }}>
-        <span style={{ color: '#00e5ff' }}>BID DEPTH</span>
-        <span>SPREAD</span>
-        <span style={{ color: '#ff2a70' }}>ASK DEPTH</span>
-      </div>
-      <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`}>
-        <line x1={width / 2} y1={0} x2={width / 2} y2={height} stroke="rgba(255,255,255,0.1)" strokeDasharray="2,2" />
-        {bidPolygon && <polygon points={bidPolygon} fill="rgba(0, 229, 255, 0.15)" stroke="#00e5ff" strokeWidth="1.5" />}
-        {askPolygon && <polygon points={askPolygon} fill="rgba(255, 42, 112, 0.15)" stroke="#ff2a70" strokeWidth="1.5" />}
-      </svg>
-    </div>
+    <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+      <line x1={width / 2} y1={0} x2={width / 2} y2={height} stroke="var(--border-light)" strokeDasharray="2,2" />
+      {bidPolygon && <polygon points={bidPolygon} fill="rgba(16, 185, 129, 0.15)" stroke="var(--emerald)" strokeWidth="1" />}
+      {askPolygon && <polygon points={askPolygon} fill="rgba(244, 63, 94, 0.15)" stroke="var(--coral)" strokeWidth="1" />}
+    </svg>
   );
 }
 
@@ -89,22 +82,43 @@ export default function App() {
       })
     });
     const data = await res.json();
-    setStatusMsg(res.ok ? `✓ ORDER EXECUTED | ${data.matchedTradesCount} matches locked in Escrow.` : `✕ BLOCKED: ${data.message || data.error}`);
+    setStatusMsg(res.ok ? `Order ${data.orderId.slice(0, 6)} routed. Matched: ${data.matchedTradesCount}.` : `Rejected: ${data.message || data.error}`);
   };
 
   const cancelOrder = async (id: string) => {
     await fetch(`http://localhost:3001/api/v1/orders/${id}`, { method: 'DELETE' });
-    setStatusMsg(`✓ Order cancelled, funds unlocked.`);
+    setStatusMsg(`Resting order ${id.slice(0, 6)} cancelled.`);
+  };
+
+  const clearDutchAuction = async () => {
+    const res = await fetch('http://localhost:3001/api/v1/auctions/clear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: activeUserId })
+    });
+    const data = await res.json();
+    setStatusMsg(res.ok ? `Auction Captured at ₹${fromMicro(data.clearingPriceMicro)}!` : `Auction Error: ${data.message}`);
+  };
+
+  const verifyEscrowDelivery = async (tradeId: string) => {
+    const res = await fetch(`http://localhost:3001/api/v1/escrow/${tradeId}/verify`, { method: 'POST' });
+    if (res.ok) setStatusMsg(`Escrow Trade ${tradeId.slice(0,6)} verified and released.`);
   };
 
   const triggerHttpBenchmark = async () => {
     setIsBenchmarking(true);
-    setStatusMsg('Initiating Autocannon TCP Stress Test...');
+    setStatusMsg('Running TCP Network Stress Test...');
     try {
       const res = await fetch('http://localhost:3001/api/v1/sim/http-benchmark', { method: 'POST' });
       setHttpBench(await res.json());
       setStatusMsg('');
     } finally { setIsBenchmarking(false); }
+  };
+
+  const triggerSwarm = async () => {
+    const res = await fetch('http://localhost:3001/api/v1/sim/swarm', { method: 'POST' });
+    const data = await res.json();
+    setStatusMsg(`Engine Burst: ${data.ordersProcessed} matched in ${data.executionTimeMs}ms.`);
   };
 
   const verifySolvency = async () => {
@@ -114,166 +128,277 @@ export default function App() {
     setClientVerifiedLeaf(await sha256Hex(`${data.userId}:${data.userNonce}:${data.userBalanceMicro}`));
   };
 
-  if (!snap) return <div style={{ padding: 40, color: '#00e5ff' }}>CONNECTING TO EXCHANGE NODE...</div>;
+  if (!snap) return <div style={{ padding: 40, color: 'var(--text-silver)', fontFamily: 'Inter' }}>Connecting to Darkhold Matching Engine...</div>;
 
   const activeProfile = snap.users[activeUserId] || Object.values(snap.users)[0];
-  const maxBidVol = Math.max(...snap.bids.map((b) => b.quantity), 1);
-  const maxAskVol = Math.max(...snap.asks.map((a) => a.quantity), 1);
+  const maxVol = Math.max(...snap.bids.map(b => b.quantity), ...snap.asks.map(a => a.quantity), 1);
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: '1600px', margin: '0 auto' }}>
-      
-      {/* Sleek Minimalist Header */}
-      <header className="glass-panel" style={{ padding: '16px 24px', marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <div className="jp-text" style={{ fontSize: 24, color: '#fff', letterSpacing: 2 }}>DARKHOLD <span style={{ color: '#00e5ff' }}>取引所</span></div>
-          <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.1)' }} />
-          <div className="mono" style={{ fontSize: 12, color: '#64748b' }}>HFT SECONDARY MARKET</div>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div className="mono" style={{ fontSize: 11, display: 'flex', gap: 16, marginRight: 16 }}>
-            <div>FACE VALUE: <span style={{ color: '#fff' }}>₹{fromMicro(snap.faceValueMicro)}</span></div>
-            <div>OPS: <span style={{ color: '#00e5ff' }}>{snap.ops}/s</span></div>
-            <div>LEDGER: <span style={{ color: snap.ledgerInvariantBalanced ? '#00e5ff' : '#ff2a70' }}>{snap.ledgerInvariantBalanced ? 'BALANCED' : 'DRIFT'}</span></div>
+    <div className="app-layout">
+      {/* Top Navigation */}
+      <header className="top-nav">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <div style={{ fontWeight: 600, letterSpacing: '1px', fontSize: 14 }}>
+            DARKHOLD <span className="text-cyan">TERMINAL</span>
           </div>
-          {(['usr_strange', 'usr_wanda'] as const).map((uid) => {
+          <div style={{ width: '1px', height: '16px', background: 'var(--border)' }} />
+          <div className="mono text-silver" style={{ display: 'flex', gap: '16px', fontSize: 11 }}>
+            <span>MARKET: <span className="text-main">DARKHOLD-VIP</span></span>
+            <span>FACE VALUE: <span className="text-main">₹{fromMicro(snap.faceValueMicro)}</span></span>
+            <span>LIVE THROUGHPUT: <span className="text-emerald">{snap.ops}/s</span></span>
+            <span>LEDGER: <span className={snap.ledgerInvariantBalanced ? 'text-emerald' : 'text-coral'}>{snap.ledgerInvariantBalanced ? 'BALANCED (ACID)' : 'DRIFT'}</span></span>
+          </div>
+        </div>
+        
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span className="text-silver" style={{ fontSize: 11, marginRight: '4px' }}>IDENTITY</span>
+          {(['usr_strange', 'usr_wanda', 'usr_wong'] as const).map(uid => {
             const u = snap.users[uid];
             if (!u) return null;
             return (
-              <button
-                key={uid} onClick={() => loginOperative(uid)}
-                className="btn-sharp"
-                style={{
-                  padding: '6px 12px', fontSize: 11,
-                  background: activeUserId === uid ? '#fff' : 'transparent',
-                  color: activeUserId === uid ? '#000' : '#fff',
-                  border: '1px solid rgba(255,255,255,0.2)'
-                }}
-              >
+              <button key={uid} onClick={() => loginOperative(uid)} className="btn" style={{ fontSize: 11, padding: '4px 8px', ...(activeUserId === uid ? { background: 'var(--text-main)', color: 'var(--obsidian)', borderColor: 'var(--text-main)' } : {}) }}>
                 {u.username.split(' ')[0]}
               </button>
-            );
+            )
           })}
         </div>
       </header>
 
-      {/* Active User Wallet Bar */}
-      {activeProfile && (
-        <div className="mono" style={{ marginBottom: 24, display: 'flex', gap: 32, fontSize: 12, color: '#94a3b8' }}>
-          <div>IDENTITY: <span style={{ color: '#fff' }}>{activeProfile.username}</span></div>
-          <div>AVAILABLE: <span style={{ color: '#00e5ff' }}>₹{fromMicro(activeProfile.availableMicro).toLocaleString()}</span></div>
-          <div>ESCROW: <span style={{ color: '#fff' }}>₹{fromMicro(activeProfile.escrowMicro).toLocaleString()}</span></div>
-          <div>INVENTORY: <span style={{ color: '#fff' }}>{activeProfile.relicInventory} PASSES</span></div>
-        </div>
-      )}
-
-      {/* 3-Column Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1.2fr', gap: 24 }}>
+      {/* 4-Column Workspace Grid */}
+      <main className="grid-workspace">
         
-        {/* Panel 1: Order Book & Depth */}
-        <section className="glass-panel" style={{ padding: 24 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', marginBottom: 16 }}>L2 ORDER BOOK</div>
-          <div className="mono" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            <div>
-              {snap.bids.map((b) => (
-                <div key={b.priceMicro} onClick={() => setPrice(String(fromMicro(b.priceMicro)))} style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 12, cursor: 'pointer' }}>
-                  <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: `${(b.quantity / maxBidVol) * 100}%`, background: 'rgba(0, 229, 255, 0.1)' }} />
-                  <span style={{ color: '#00e5ff', zIndex: 1 }}>₹{fromMicro(b.priceMicro)}</span>
-                  <span style={{ color: '#fff', zIndex: 1 }}>{b.quantity}</span>
-                </div>
-              ))}
-            </div>
-            <div>
-              {snap.asks.map((a) => (
-                <div key={a.priceMicro} onClick={() => setPrice(String(fromMicro(a.priceMicro)))} style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 12, cursor: 'pointer' }}>
-                  <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${(a.quantity / maxAskVol) * 100}%`, background: 'rgba(255, 42, 112, 0.1)' }} />
-                  <span style={{ color: '#ff2a70', zIndex: 1 }}>₹{fromMicro(a.priceMicro)}</span>
-                  <span style={{ color: '#fff', zIndex: 1 }}>{a.quantity}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-          <MarketDepthChart bids={snap.bids} asks={snap.asks} />
-        </section>
-
-        {/* Panel 2: Execution & Dutch Auction */}
-        <section className="glass-panel" style={{ padding: 24 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', marginBottom: 16 }}>ORDER DISPATCH</div>
-          <form onSubmit={submitOrder} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button type="button" onClick={() => setSide('BUY')} className="btn-sharp" style={{ flex: 1, padding: 10, background: side === 'BUY' ? '#00e5ff' : 'rgba(255,255,255,0.05)', color: side === 'BUY' ? '#000' : '#fff', border: 'none' }}>BUY</button>
-              <button type="button" onClick={() => setSide('SELL')} className="btn-sharp" style={{ flex: 1, padding: 10, background: side === 'SELL' ? '#ff2a70' : 'rgba(255,255,255,0.05)', color: side === 'SELL' ? '#fff' : '#fff', border: 'none' }}>SELL</button>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {(['LIMIT', 'MARKET'] as const).map(t => (
-                <button key={t} type="button" onClick={() => setOrderType(t)} className="btn-sharp" style={{ flex: 1, padding: 8, fontSize: 11, background: orderType === t ? '#fff' : 'transparent', color: orderType === t ? '#000' : '#fff', border: '1px solid rgba(255,255,255,0.2)' }}>{t}</button>
-              ))}
-            </div>
-            
-            <div className="mono" style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <input type="number" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="Price (₹)" style={{ flex: 2, padding: 10, background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff' }} />
-              <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" style={{ flex: 1, padding: 10, background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff' }} />
-            </div>
-
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: '#64748b', cursor: 'pointer', marginTop: 8 }}>
-              <input type="checkbox" checked={simulateBot} onChange={(e) => setSimulateBot(e.target.checked)} />
-              Simulate Scalper (Omit PoW)
-            </label>
-
-            <button type="submit" className="btn-sharp" style={{ padding: 12, marginTop: 8, background: '#fff', color: '#000', border: 'none' }}>
-              EXECUTE
-            </button>
-          </form>
-
-          {statusMsg && <div className="mono" style={{ marginTop: 12, padding: 10, background: 'rgba(255,255,255,0.05)', fontSize: 11, color: '#fff' }}>{statusMsg}</div>}
-        </section>
-
-        {/* Panel 3: Diagnostics & Ledger */}
-        <section className="glass-panel" style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 20 }}>
-          
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', marginBottom: 12 }}>SYSTEM DIAGNOSTICS</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={triggerHttpBenchmark} disabled={isBenchmarking} className="btn-sharp" style={{ flex: 1, padding: 10, background: 'rgba(255, 42, 112, 0.1)', color: '#ff2a70', border: '1px solid #ff2a70', fontSize: 11 }}>
-                {isBenchmarking ? 'RUNNING...' : 'NETWORK STRESS TEST'}
-              </button>
-              <button onClick={verifySolvency} className="btn-sharp" style={{ flex: 1, padding: 10, background: 'rgba(0, 229, 255, 0.1)', color: '#00e5ff', border: '1px solid #00e5ff', fontSize: 11 }}>
-                VERIFY SOLVENCY
-              </button>
-            </div>
-            
-            {httpBench && (
-              <div className="mono" style={{ marginTop: 12, padding: 12, background: 'rgba(0,0,0,0.3)', borderLeft: '2px solid #ff2a70', fontSize: 11, color: '#fff' }}>
-                <div style={{ color: '#64748b', marginBottom: 4 }}>AUTOCANNON RESULTS</div>
-                <div>AVG: <span style={{ color: '#00e5ff' }}>{httpBench.requestsPerSecAvg.toLocaleString()} RPS</span></div>
-                <div>P99: <span>{httpBench.latencyP99Ms}ms</span></div>
+        {/* Column 1: Wallet & Orderbook */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <section className="panel">
+            <div className="panel-header">Wallet Status</div>
+            <div className="panel-body mono" style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <div className="data-row"><span className="text-silver">Available</span><span className="text-main">₹{fromMicro(activeProfile.availableMicro).toLocaleString()}</span></div>
+              <div className="data-row"><span className="text-silver">Locked in Orders</span><span className="text-dim">₹{fromMicro(activeProfile.lockedMicro).toLocaleString()}</span></div>
+              <div className="data-row"><span className="text-silver">Escrow Custody</span><span className="text-cyan">₹{fromMicro(activeProfile.escrowMicro).toLocaleString()}</span></div>
+              <div className="data-row" style={{ marginTop: '4px', paddingTop: '8px', borderTop: '1px solid var(--border)' }}>
+                <span className="text-silver">Relic Inventory</span><span className="text-main">{activeProfile.relicInventory} Passes</span>
               </div>
-            )}
-
-            {solvencyProof && (
-              <div className="mono" style={{ marginTop: 12, padding: 12, background: 'rgba(0,0,0,0.3)', borderLeft: '2px solid #00e5ff', fontSize: 11, color: '#fff', wordBreak: 'break-all' }}>
-                <div style={{ color: '#00e5ff', marginBottom: 4 }}>✓ ASSETS == LIABILITIES</div>
-                <div style={{ color: '#64748b' }}>ROOT: {solvencyProof.merkleRootHash.slice(0, 20)}...</div>
-                <div style={{ color: '#64748b' }}>LEAF: {clientVerifiedLeaf.slice(0, 20)}...</div>
-              </div>
-            )}
-          </div>
-
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', marginBottom: 12 }}>DOUBLE-ENTRY AUDIT</div>
-            <div className="mono" style={{ flex: 1, overflowY: 'auto', maxHeight: 150, fontSize: 10 }}>
-              {snap.recentLedger.map((entry) => (
-                <div key={entry.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                  <span><span style={{ color: '#ff2a70' }}>DR</span> {entry.debitAccount.split(':')[0]} <span style={{ color: '#64748b' }}>→</span> <span style={{ color: '#00e5ff' }}>CR</span> {entry.creditAccount.split(':')[0]}</span>
-                  <span style={{ color: '#fff' }}>₹{fromMicro(entry.amountMicro).toLocaleString()}</span>
-                </div>
-              ))}
             </div>
-          </div>
+          </section>
 
-        </section>
-      </div>
+          <section className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+            <div className="panel-header">Level 2 Order Book</div>
+            <div className="panel-body no-pad mono" style={{ display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 12px', fontSize: 10, color: 'var(--text-dim)', borderBottom: '1px solid var(--border)' }}>
+                <span>PRICE</span><span>SIZE</span><span>TOTAL</span>
+              </div>
+              <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                {/* Asks (Lowest ask at the bottom) */}
+                <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: '130px' }}>
+                  {snap.asks.slice().reverse().map(a => (
+                    <div key={a.priceMicro} style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', padding: '2px 12px', cursor: 'pointer' }} onClick={() => setPrice(String(fromMicro(a.priceMicro)))}>
+                      <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: `${(a.cumulativeQuantity / maxVol) * 100}%`, background: 'var(--bg-coral-dim)' }} />
+                      <span className="text-coral" style={{ zIndex: 1 }}>{fromMicro(a.priceMicro).toFixed(2)}</span>
+                      <span style={{ zIndex: 1 }}>{a.quantity}</span>
+                      <span className="text-dim" style={{ zIndex: 1 }}>{a.cumulativeQuantity}</span>
+                    </div>
+                  ))}
+                </div>
+                {/* Spread */}
+                <div style={{ padding: '4px 12px', background: 'var(--surface)', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)', textAlign: 'center', fontSize: 11, color: 'var(--text-silver)' }}>
+                  SPREAD: {((Number(snap.asks[0]?.priceMicro || 0) - Number(snap.bids[0]?.priceMicro || 0))/1e6).toFixed(2)}
+                </div>
+                {/* Bids (Highest bid at top) */}
+                <div style={{ display: 'flex', flexDirection: 'column', minHeight: '130px' }}>
+                  {snap.bids.map(b => (
+                    <div key={b.priceMicro} style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', padding: '2px 12px', cursor: 'pointer' }} onClick={() => setPrice(String(fromMicro(b.priceMicro)))}>
+                      <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: `${(b.cumulativeQuantity / maxVol) * 100}%`, background: 'var(--bg-emerald-dim)' }} />
+                      <span className="text-emerald" style={{ zIndex: 1 }}>{fromMicro(b.priceMicro).toFixed(2)}</span>
+                      <span style={{ zIndex: 1 }}>{b.quantity}</span>
+                      <span className="text-dim" style={{ zIndex: 1 }}>{b.cumulativeQuantity}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel" style={{ height: '120px' }}>
+            <div className="panel-header">Cumulative Depth</div>
+            <div className="panel-body no-pad"><MarketDepthChart bids={snap.bids} asks={snap.asks} /></div>
+          </section>
+        </div>
+
+        {/* Column 2: Order Entry & Open Orders */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <section className="panel">
+            <div className="panel-header">Order Entry</div>
+            <div className="panel-body">
+              <form onSubmit={submitOrder}>
+                <div style={{ display: 'flex', gap: '4px', marginBottom: '12px' }}>
+                  <button type="button" className="btn" style={{ flex: 1, ...(side === 'BUY' ? { background: 'var(--emerald)', color: 'var(--obsidian)', borderColor: 'var(--emerald)', fontWeight: 600 } : {}) }} onClick={() => setSide('BUY')}>BUY</button>
+                  <button type="button" className="btn" style={{ flex: 1, ...(side === 'SELL' ? { background: 'var(--coral)', color: 'var(--obsidian)', borderColor: 'var(--coral)', fontWeight: 600 } : {}) }} onClick={() => setSide('SELL')}>SELL</button>
+                </div>
+                <div style={{ display: 'flex', gap: '4px', marginBottom: '12px' }}>
+                  {['LIMIT', 'MARKET'].map(t => (
+                    <button key={t} type="button" className="btn" style={{ flex: 1, ...(orderType === t ? { background: 'var(--surface-hover)', borderColor: 'var(--text-silver)' } : {}) }} onClick={() => setOrderType(t)}>{t}</button>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: '4px', marginBottom: '12px' }}>
+                  {['GTC', 'IOC', 'FOK'].map(t => (
+                    <button key={t} type="button" className="btn" style={{ flex: 1, fontSize: 10, padding: '4px', ...(timeInForce === t ? { background: 'var(--surface-hover)', borderColor: 'var(--text-silver)' } : {}) }} onClick={() => setTimeInForce(t)}>{t}</button>
+                  ))}
+                </div>
+                {orderType === 'LIMIT' && (
+                  <div className="form-group">
+                    <label className="form-label">Price (₹)</label>
+                    <input type="number" className="input-field mono" value={price} onChange={e => setPrice(e.target.value)} />
+                  </div>
+                )}
+                <div className="form-group">
+                  <label className="form-label">Quantity</label>
+                  <input type="number" className="input-field mono" value={qty} onChange={e => setQty(e.target.value)} />
+                </div>
+                
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--text-silver)', cursor: 'pointer', marginBottom: 12 }}>
+                  <input type="checkbox" checked={simulateBot} onChange={(e) => setSimulateBot(e.target.checked)} /> Simulate Scalper Bot (No PoW)
+                </label>
+
+                <button type="submit" className={`btn ${side === 'BUY' ? 'btn-emerald-solid' : 'btn-coral-solid'}`} style={{ width: '100%', padding: '10px' }}>
+                  Submit {side} Order
+                </button>
+              </form>
+              
+              {statusMsg && (
+                <div className="mono" style={{ marginTop: 12, padding: '8px', background: 'var(--surface)', borderLeft: '2px solid var(--text-silver)', fontSize: 11, color: 'var(--text-silver)', wordBreak: 'break-word' }}>
+                  {statusMsg}
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="panel" style={{ flex: 1 }}>
+            <div className="panel-header">Open Orders</div>
+            <div className="panel-body no-pad">
+              <table className="data-table">
+                <thead><tr><th>SIDE</th><th>PRICE</th><th>QTY</th><th>ACT</th></tr></thead>
+                <tbody className="mono">
+                  {snap.openOrders.length === 0 && <tr><td colSpan={4} className="text-dim" style={{ textAlign: 'center', padding: '16px' }}>No open orders</td></tr>}
+                  {snap.openOrders.map(o => (
+                    <tr key={o.id}>
+                      <td className={o.side === 'BUY' ? 'text-emerald' : 'text-coral'}>{o.side}</td>
+                      <td>{fromMicro(o.priceMicro).toFixed(2)}</td>
+                      <td>{o.remainingQty}</td>
+                      <td><button className="btn" style={{ padding: '2px 6px', fontSize: 10 }} onClick={() => cancelOrder(o.id)}>✕</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        {/* Column 3: Tape & Ledger Audit */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <section className="panel" style={{ flex: 1 }}>
+            <div className="panel-header">Double-Entry Ledger Audit</div>
+            <div className="panel-body no-pad">
+              <table className="data-table">
+                <thead><tr><th>DEBIT</th><th>CREDIT</th><th>AMOUNT</th></tr></thead>
+                <tbody className="mono">
+                  {snap.recentLedger.length === 0 && <tr><td colSpan={3} className="text-dim" style={{ textAlign: 'center', padding: '16px' }}>No ledger events</td></tr>}
+                  {snap.recentLedger.map(entry => (
+                    <tr key={entry.id}>
+                      <td className="text-dim">{entry.debitAccount.split(':')[0]}</td>
+                      <td className="text-dim">{entry.creditAccount.split(':')[0]}</td>
+                      <td className="text-main">₹{fromMicro(entry.amountMicro).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <span className="text-amber">Dutch Auction Bay</span>
+            </div>
+            <div className="panel-body mono" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-silver)', marginBottom: 6 }}>{snap.dutchAuction.relicName}</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 12 }}>
+                <div>
+                  <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>Current Offer</div>
+                  <div className="text-amber" style={{ fontSize: 24, fontWeight: 600, lineHeight: 1 }}>₹{fromMicro(snap.dutchAuction.currentPriceMicro).toLocaleString()}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>Decay Rate</div>
+                  <div className="text-coral">-₹{fromMicro(snap.dutchAuction.dropPerSecMicro)}/s</div>
+                </div>
+              </div>
+              <button className="btn" style={{ background: 'var(--amber)', color: 'var(--obsidian)', fontWeight: 600, border: 'none' }} onClick={clearDutchAuction}>
+                Instant Liquidate
+              </button>
+            </div>
+          </section>
+        </div>
+
+        {/* Column 4: Escrow & Diagnostics */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <section className="panel" style={{ flex: 1 }}>
+            <div className="panel-header">Escrow Custody Queue</div>
+            <div className="panel-body no-pad">
+              <table className="data-table">
+                <thead><tr><th>QTY</th><th>PRICE</th><th>STATUS</th></tr></thead>
+                <tbody className="mono">
+                  {snap.recentTrades.length === 0 && <tr><td colSpan={3} className="text-dim" style={{ textAlign: 'center', padding: '16px' }}>No pending escrows</td></tr>}
+                  {snap.recentTrades.map(t => (
+                    <tr key={t.id}>
+                      <td>{t.quantity}</td>
+                      <td>{fromMicro(t.priceMicro).toFixed(2)}</td>
+                      <td>
+                        {t.escrowStatus === 'LOCKED_PENDING_DELIVERY' ? (
+                          <button className="btn btn-primary" style={{ padding: '2px 6px', fontSize: 10 }} onClick={() => verifyEscrowDelivery(t.id)}>Verify</button>
+                        ) : (
+                          <span className="text-emerald">Released ✓</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">System Diagnostics</div>
+            <div className="panel-body">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <button className="btn btn-primary" onClick={triggerHttpBenchmark} disabled={isBenchmarking}>
+                  {isBenchmarking ? 'Running Autocannon...' : 'Run TCP Network Benchmark'}
+                </button>
+                <button className="btn" onClick={triggerSwarm}>
+                  Run 2,500-Order Engine Burst
+                </button>
+                <button className="btn" onClick={verifySolvency} style={{ borderColor: 'var(--cyan)', color: 'var(--cyan)' }}>
+                  Verify Merkle Solvency
+                </button>
+              </div>
+              
+              {httpBench && (
+                <div className="mono" style={{ marginTop: 12, padding: '8px', background: 'var(--surface)', borderLeft: '2px solid var(--cyan)', fontSize: 11, color: 'var(--text-main)' }}>
+                  <div className="text-silver" style={{ marginBottom: 4 }}>Autocannon Results</div>
+                  <div>AVG: <span className="text-cyan">{httpBench.requestsPerSecAvg.toLocaleString()} RPS</span></div>
+                  <div>P99: <span>{httpBench.latencyP99Ms}ms</span></div>
+                </div>
+              )}
+
+              {solvencyProof && (
+                <div className="mono" style={{ marginTop: 12, padding: '8px', background: 'var(--surface)', borderLeft: '2px solid var(--emerald)', fontSize: 11, color: 'var(--text-main)', wordBreak: 'break-all' }}>
+                  <div className="text-emerald" style={{ marginBottom: 4 }}>✓ Assets == Liabilities</div>
+                  <div className="text-silver">ROOT: {solvencyProof.merkleRootHash.slice(0, 16)}...</div>
+                  <div className="text-silver">LEAF: {clientVerifiedLeaf.slice(0, 16)}...</div>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+
+      </main>
     </div>
   );
 }
