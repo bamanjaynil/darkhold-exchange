@@ -72,7 +72,7 @@ export class OrderBook {
         cancelledOrders: [],
         rejectedReason: 'UNSUPPORTED_COMBINATION',
       };
-      this.clientOrderHistory.set(idempKey, errRes);
+      this.recordClientOrder(idempKey, errRes);
       return errRes;
     }
 
@@ -245,7 +245,7 @@ export class OrderBook {
       filledOrders,
     };
 
-    this.clientOrderHistory.set(idempKey, result);
+    this.recordClientOrder(idempKey, result);
     return result;
   }
 
@@ -450,6 +450,16 @@ export class OrderBook {
     }
   }
 
+  private recordClientOrder(idempKey: string, result: EngineResult): void {
+    if (this.clientOrderHistory.size >= 50000) {
+      const oldestKey = this.clientOrderHistory.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.clientOrderHistory.delete(oldestKey);
+      }
+    }
+    this.clientOrderHistory.set(idempKey, result);
+  }
+
   private reject(idempKey: string, seq: number, reason: string): EngineResult {
     const res: EngineResult = {
       success: false,
@@ -458,7 +468,7 @@ export class OrderBook {
       cancelledOrders: [],
       rejectedReason: reason,
     };
-    this.clientOrderHistory.set(idempKey, res);
+    this.recordClientOrder(idempKey, res);
     return res;
   }
 }

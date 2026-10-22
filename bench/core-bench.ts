@@ -12,14 +12,16 @@ import { bootstrapCore } from '../apps/server/src/recovery.js';
 import { SystemClock } from '../apps/server/src/clock.js';
 import { runReconciliation } from '../apps/server/src/reconciliation.js';
 
-export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batchMs = 5) {
-  const mode = process.env.POSTINGS_WRITE_MODE || 'values';
+export async function runCoreBenchmark(iterations = 5_000, batchMax = 500, batchMs = 5) {
+  const envBatchMax = process.env.PERSIST_BATCH_MAX ? parseInt(process.env.PERSIST_BATCH_MAX, 10) : undefined;
+  const effectiveBatchMax = envBatchMax ?? batchMax;
+  const mode = process.env.POSTINGS_WRITE_MODE || 'unnest';
   console.log(`[BENCH:CORE] Setting up test database (POSTINGS_WRITE_MODE=${mode})...`);
   const pool = await setupTestDatabase();
   const clock = new SystemClock();
 
-  console.log(`[BENCH:CORE] Bootstrapping ExchangeCore (PERSIST_BATCH_MAX=${batchMax}, PERSIST_BATCH_MS=${batchMs})...`);
-  const core = await bootstrapCore(pool, clock, batchMax, batchMs, true);
+  console.log(`[BENCH:CORE] Bootstrapping ExchangeCore (PERSIST_BATCH_MAX=${effectiveBatchMax}, PERSIST_BATCH_MS=${batchMs})...`);
+  const core = await bootstrapCore(pool, clock, effectiveBatchMax, batchMs, true);
 
   console.log(`[BENCH:CORE] Submitting ${iterations.toLocaleString()} orders through ExchangeCore + group commit...`);
 

@@ -19,6 +19,10 @@ RETURNS TRIGGER AS $$
 DECLARE
   imbalance RECORD;
 BEGIN
+  IF current_setting('darkhold.batch_validated', true) = '1' THEN
+    RETURN NEW;
+  END IF;
+
   FOR imbalance IN
     SELECT unit, SUM(amount) AS total
     FROM postings

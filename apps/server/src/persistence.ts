@@ -178,9 +178,10 @@ export class PersistenceEngine {
   private failedTransactionsCount = 0;
   private rollbacksCount = 0;
 
-  constructor(pool: pg.Pool, batchMax: number = 100, batchMs: number = 5) {
+  constructor(pool: pg.Pool, batchMax?: number, batchMs: number = 5) {
+    const envBatchMax = process.env.PERSIST_BATCH_MAX ? parseInt(process.env.PERSIST_BATCH_MAX, 10) : undefined;
     this.pool = pool;
-    this.batchMax = batchMax;
+    this.batchMax = envBatchMax ?? batchMax ?? 500;
     this.batchMs = batchMs;
   }
 
@@ -317,23 +318,29 @@ export class PersistenceEngine {
 
       this.coalesceRamMs.push(performance.now() - tCoalesce);
 
-      // Execute Bulk Insert Journals (in chunks of 500)
+      // Execute Bulk Insert Journals
       const tJournals = performance.now();
-      const J_CHUNK = 500;
-      for (let i = 0; i < allJournals.length; i += J_CHUNK) {
-        const chunk = allJournals.slice(i, i + J_CHUNK);
-        const values: any[] = [];
-        const rows = chunk.map((j, idx) => {
-          const base = idx * 4;
-          values.push(j.id, j.kind, j.refType, j.refId);
-          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
+      if (allJournals.length > 0) {
+        const ids: string[] = [];
+        const kinds: string[] = [];
+        const refTypes: string[] = [];
+        const refIds: string[] = [];
+
+        for (let i = 0; i < allJournals.length; i++) {
+          const j = allJournals[i]!;
+          ids.push(j.id);
+          kinds.push(j.kind);
+          refTypes.push(j.refType);
+          refIds.push(j.refId);
+        }
+
+        await client.query({
+          name: 'insert_journals_unnest',
+          text: `INSERT INTO journals (id, kind, ref_type, ref_id)
+                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[])
+                 ON CONFLICT (id) DO NOTHING`,
+          values: [ids, kinds, refTypes, refIds],
         });
-        await client.query(
-          `INSERT INTO journals (id, kind, ref_type, ref_id)
-           VALUES ${rows.join(', ')}
-           ON CONFLICT (id) DO NOTHING`,
-          values
-        );
         this.queryCountJournals++;
       }
       this.sqlJournalsMs.push(performance.now() - tJournals);
@@ -341,10 +348,29 @@ export class PersistenceEngine {
 
       // Execute Bulk Insert Postings
       const tPostings = performance.now();
-      const postingsMode = process.env.POSTINGS_WRITE_MODE || 'values';
+      const postingsMode = process.env.POSTINGS_WRITE_MODE || 'unnest';
 
       if (allPostings.length > 0) {
-        if (postingsMode === 'unnest') {
+        if (postingsMode === 'values') {
+          // 'values' fallback mode (chunked multi-row INSERT at 300 rows)
+          const P_CHUNK = 300;
+          for (let i = 0; i < allPostings.length; i += P_CHUNK) {
+            const chunk = allPostings.slice(i, i + P_CHUNK);
+            const values: any[] = [];
+            const rows = chunk.map((p, idx) => {
+              const base = idx * 5;
+              values.push(p.journalId, p.accountId, p.unit, p.amount, p.seq);
+              return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+            });
+            await client.query(
+              `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
+               VALUES ${rows.join(', ')}`,
+              values
+            );
+            this.queryCountPostings++;
+          }
+        } else {
+          // Columnar UNNEST mode (permanent default)
           const journalIds: string[] = [];
           const accountIds: string[] = [];
           const units: string[] = [];
@@ -363,28 +389,10 @@ export class PersistenceEngine {
           await client.query({
             name: 'insert_postings_unnest',
             text: `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
-                   SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::bigint[], $5::bigint[])`,
+                   SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::varchar[], $4::bigint[], $5::bigint[])`,
             values: [journalIds, accountIds, units, amounts, seqs],
           });
           this.queryCountPostings++;
-        } else {
-          // 'values' mode (chunked multi-row INSERT at 300 rows)
-          const P_CHUNK = 300;
-          for (let i = 0; i < allPostings.length; i += P_CHUNK) {
-            const chunk = allPostings.slice(i, i + P_CHUNK);
-            const values: any[] = [];
-            const rows = chunk.map((p, idx) => {
-              const base = idx * 5;
-              values.push(p.journalId, p.accountId, p.unit, p.amount, p.seq);
-              return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
-            });
-            await client.query(
-              `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
-               VALUES ${rows.join(', ')}`,
-              values
-            );
-            this.queryCountPostings++;
-          }
         }
       }
       this.sqlPostingsMs.push(performance.now() - tPostings);
@@ -428,77 +436,120 @@ export class PersistenceEngine {
       }
       this.sqlHoldingsMs.push(performance.now() - tHoldings);
 
-      // Execute Orders Bulk Upsert
+      // Execute Orders Bulk Upsert (Columnar UNNEST)
       const tOrders = performance.now();
-      const O_CHUNK = 200;
-      for (let i = 0; i < allOrders.length; i += O_CHUNK) {
-        const chunk = allOrders.slice(i, i + O_CHUNK);
-        const values: any[] = [];
-        const rows = chunk.map((ord, idx) => {
-          const base = idx * 12;
-          values.push(
-            ord.id,
-            ord.clientOrderId,
-            ord.seq,
-            ord.userId,
-            ord.symbol,
-            ord.side,
-            ord.type,
-            ord.tif,
-            ord.price,
-            ord.qty,
-            ord.remainingQty,
-            ord.status
-          );
-          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, (SELECT id FROM instruments WHERE symbol = $${base + 5}), $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12})`;
-        });
+      if (allOrders.length > 0) {
+        const ids: string[] = [];
+        const clientOrderIds: string[] = [];
+        const seqs: number[] = [];
+        const userIds: string[] = [];
+        const symbols: string[] = [];
+        const sides: string[] = [];
+        const types: string[] = [];
+        const tifs: string[] = [];
+        const prices: number[] = [];
+        const qtys: number[] = [];
+        const remainingQtys: number[] = [];
+        const statuses: string[] = [];
 
-        await client.query(
-          `INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
-           VALUES ${rows.join(', ')}
-           ON CONFLICT (id) DO UPDATE SET
-             remaining_qty = EXCLUDED.remaining_qty,
-             status = EXCLUDED.status,
-             updated_at = NOW()`,
-          values
-        );
+        for (let i = 0; i < allOrders.length; i++) {
+          const ord = allOrders[i]!;
+          ids.push(ord.id);
+          clientOrderIds.push(ord.clientOrderId);
+          seqs.push(ord.seq);
+          userIds.push(ord.userId);
+          symbols.push(ord.symbol);
+          sides.push(ord.side);
+          types.push(ord.type);
+          tifs.push(ord.tif);
+          prices.push(ord.price);
+          qtys.push(ord.qty);
+          remainingQtys.push(ord.remainingQty);
+          statuses.push(ord.status);
+        }
+
+        await client.query({
+          name: 'upsert_orders_unnest',
+          text: `INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
+                 SELECT u.id, u.client_order_id, u.seq, u.user_id, i.id, u.side, u.type, u.tif, u.price, u.qty, u.remaining_qty, u.status
+                 FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::varchar[], $9::bigint[], $10::int[], $11::int[], $12::varchar[])
+                   AS u(id, client_order_id, seq, user_id, symbol, side, type, tif, price, qty, remaining_qty, status)
+                 JOIN instruments i ON i.symbol = u.symbol
+                 ON CONFLICT (id) DO UPDATE SET
+                   remaining_qty = EXCLUDED.remaining_qty,
+                   status = EXCLUDED.status,
+                   updated_at = NOW()
+                 WHERE orders.status <> EXCLUDED.status OR orders.remaining_qty <> EXCLUDED.remaining_qty`,
+          values: [
+            ids,
+            clientOrderIds,
+            seqs,
+            userIds,
+            symbols,
+            sides,
+            types,
+            tifs,
+            prices,
+            qtys,
+            remainingQtys,
+            statuses,
+          ],
+        });
         this.queryCountOrders++;
       }
       this.sqlOrdersMs.push(performance.now() - tOrders);
       this.totalOrdersUpsertedCount += allOrders.length;
 
-      // Execute Trades Bulk Insert
+      // Execute Trades Bulk Insert (Columnar UNNEST)
       const tTrades = performance.now();
       if (allTrades.length > 0) {
-        const T_CHUNK = 200;
-        for (let i = 0; i < allTrades.length; i += T_CHUNK) {
-          const chunk = allTrades.slice(i, i + T_CHUNK);
-          const values: any[] = [];
-          const rows = chunk.map((tr, idx) => {
-            const base = idx * 10;
-            values.push(
-              tr.id,
-              tr.seq,
-              tr.symbol,
-              tr.buyOrderId,
-              tr.sellOrderId,
-              tr.buyerUserId,
-              tr.sellerUserId,
-              tr.price,
-              tr.qty,
-              tr.buyerRefund
-            );
-            return `($${base + 1}, $${base + 2}, (SELECT id FROM instruments WHERE symbol = $${base + 3}), $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, false)`;
-          });
+        const ids: string[] = [];
+        const seqs: number[] = [];
+        const symbols: string[] = [];
+        const buyOrderIds: string[] = [];
+        const sellOrderIds: string[] = [];
+        const buyerUserIds: string[] = [];
+        const sellerUserIds: string[] = [];
+        const prices: number[] = [];
+        const qtys: number[] = [];
+        const buyerRefunds: number[] = [];
 
-          await client.query(
-            `INSERT INTO trades (id, seq, instrument_id, buy_order_id, sell_order_id, buyer_user_id, seller_user_id, price, qty, buyer_refund, is_simulated)
-             VALUES ${rows.join(', ')}
-             ON CONFLICT (id) DO NOTHING`,
-            values
-          );
-          this.queryCountTrades++;
+        for (let i = 0; i < allTrades.length; i++) {
+          const tr = allTrades[i]!;
+          ids.push(tr.id);
+          seqs.push(tr.seq);
+          symbols.push(tr.symbol);
+          buyOrderIds.push(tr.buyOrderId);
+          sellOrderIds.push(tr.sellOrderId);
+          buyerUserIds.push(tr.buyerUserId);
+          sellerUserIds.push(tr.sellerUserId);
+          prices.push(tr.price);
+          qtys.push(tr.qty);
+          buyerRefunds.push(tr.buyerRefund);
         }
+
+        await client.query({
+          name: 'insert_trades_unnest',
+          text: `INSERT INTO trades (id, seq, instrument_id, buy_order_id, sell_order_id, buyer_user_id, seller_user_id, price, qty, buyer_refund, is_simulated)
+                 SELECT u.id, u.seq, i.id, u.buy_order_id, u.sell_order_id, u.buyer_user_id, u.seller_user_id, u.price, u.qty, u.buyer_refund, false
+                 FROM UNNEST($1::varchar[], $2::bigint[], $3::varchar[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::bigint[], $9::int[], $10::bigint[])
+                   AS u(id, seq, symbol, buy_order_id, sell_order_id, buyer_user_id, seller_user_id, price, qty, buyer_refund)
+                 JOIN instruments i ON i.symbol = u.symbol
+                 ON CONFLICT (id) DO NOTHING`,
+          values: [
+            ids,
+            seqs,
+            symbols,
+            buyOrderIds,
+            sellOrderIds,
+            buyerUserIds,
+            sellerUserIds,
+            prices,
+            qtys,
+            buyerRefunds,
+          ],
+        });
+        this.queryCountTrades++;
       }
       this.sqlTradesMs.push(performance.now() - tTrades);
       this.totalTradesInsertedCount += allTrades.length;
@@ -569,6 +620,29 @@ export class PersistenceEngine {
         }
       }
       this.sqlMiscMs.push(performance.now() - tMisc);
+
+      // Fast set-based ledger verification before COMMIT
+      if (allJournals.length > 0) {
+        const journalIds = allJournals.map((j) => j.id);
+        const checkRes = await client.query({
+          name: 'verify_batch_journals_balanced',
+          text: `SELECT journal_id, unit, SUM(amount) AS total
+                 FROM postings
+                 WHERE journal_id = ANY($1::varchar[])
+                 GROUP BY journal_id, unit
+                 HAVING SUM(amount) <> 0`,
+          values: [journalIds],
+        });
+
+        if (checkRes.rows.length > 0) {
+          const imb = checkRes.rows[0];
+          throw new Error(
+            `Journal ${imb.journal_id} violates double-entry invariant: unit ${imb.unit} sums to ${imb.total} (must be 0)`
+          );
+        }
+
+        await client.query("SET LOCAL darkhold.batch_validated = '1'");
+      }
 
       // Execute COMMIT (includes deferred trigger execution in Postgres)
       const tCommit = performance.now();

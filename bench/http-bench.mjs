@@ -38,41 +38,46 @@ async function run() {
   let accepted = 0;
   let rejected = 0;
 
+  const CONCURRENCY = 50;
   const endTime = Date.now() + DURATION_SEC * 1000;
   const startTime = Date.now();
 
-  while (Date.now() < endTime) {
-    submitted++;
-    const t0 = performance.now();
-    try {
-      const res = await fetch(`${BASE_URL}/api/orders`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Cookie: cookies,
-          'x-csrf-token': csrfToken,
-          'x-bench-bypass': 'true',
-        },
-        body: JSON.stringify({
-          clientOrderId: `http_bench_${Date.now()}_${submitted}`,
-          symbol: 'BENCH-X',
-          side: submitted % 2 === 0 ? 'BUY' : 'SELL',
-          type: 'LIMIT',
-          tif: 'GTC',
-          price: 100000,
-          qty: 1,
-        }),
-      });
+  const workers = Array.from({ length: CONCURRENCY }, async (_, workerId) => {
+    while (Date.now() < endTime) {
+      const current = ++submitted;
+      const t0 = performance.now();
+      try {
+        const res = await fetch(`${BASE_URL}/api/orders`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Cookie: cookies,
+            'x-csrf-token': csrfToken,
+            'x-bench-bypass': 'true',
+          },
+          body: JSON.stringify({
+            clientOrderId: `http_bench_${Date.now()}_${workerId}_${current}`,
+            symbol: 'BENCH-X',
+            side: current % 2 === 0 ? 'BUY' : 'SELL',
+            type: 'LIMIT',
+            tif: 'GTC',
+            price: 100000,
+            qty: 1,
+          }),
+        });
 
-      const t1 = performance.now();
-      latenciesMs.push(t1 - t0);
+        const t1 = performance.now();
+        latenciesMs.push(t1 - t0);
 
-      if (res.ok) accepted++;
-      else rejected++;
-    } catch {
-      rejected++;
+        if (res.ok) accepted++;
+        else rejected++;
+      } catch {
+        rejected++;
+      }
     }
-  }
+  });
+
+  await Promise.all(workers);
 
   const durationMs = Date.now() - startTime;
   const throughput = Math.round((submitted / (durationMs / 1000)));

@@ -15,7 +15,7 @@ import { acquireWriterLock } from './db.js';
 export async function bootstrapCore(
   pool: pg.Pool,
   clock: Clock,
-  batchMax: number = 100,
+  batchMax: number = 500,
   batchMs: number = 5,
   forceStart: boolean = false
 ): Promise<ExchangeCore> {
