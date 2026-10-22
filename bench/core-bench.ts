@@ -13,7 +13,8 @@ import { SystemClock } from '../apps/server/src/clock.js';
 import { runReconciliation } from '../apps/server/src/reconciliation.js';
 
 export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batchMs = 5) {
-  console.log('[BENCH:CORE] Setting up test database...');
+  const mode = process.env.POSTINGS_WRITE_MODE || 'values';
+  console.log(`[BENCH:CORE] Setting up test database (POSTINGS_WRITE_MODE=${mode})...`);
   const pool = await setupTestDatabase();
   const clock = new SystemClock();
 
@@ -22,6 +23,8 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batch
 
   console.log(`[BENCH:CORE] Submitting ${iterations.toLocaleString()} orders through ExchangeCore + group commit...`);
 
+  if (global.gc) global.gc();
+  const initialMemory = process.memoryUsage();
   const startTime = Date.now();
   const promises: Promise<any>[] = [];
 
@@ -50,6 +53,8 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batch
   await core.persistence.flush();
 
   const totalDurationMs = Date.now() - startTime;
+  const finalMemory = process.memoryUsage();
+  const heapUsedDeltaMb = Math.round(((finalMemory.heapUsed - initialMemory.heapUsed) / (1024 * 1024)) * 100) / 100;
   const throughputOps = Math.round((iterations / totalDurationMs) * 1000);
 
   console.log('[BENCH:CORE] Running post-benchmark double-entry ledger reconciliation...');
@@ -65,6 +70,7 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batch
       batchMax,
       batchMs,
       iterations,
+      postingsWriteMode: mode,
     },
     metrics: {
       totalOrders: iterations,
@@ -72,6 +78,7 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batch
       throughputOpsSec: throughputOps,
       avgLatencyMs: Math.round((totalDurationMs / iterations) * 100) / 100,
       postReconciliationBalanced: recReport.balanced,
+      heapUsedDeltaMb,
     },
     dispatchTelemetry,
     persistenceTelemetry,
@@ -81,7 +88,10 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batch
   if (!fs.existsSync(resultsDir)) fs.mkdirSync(resultsDir, { recursive: true });
   fs.writeFileSync(path.join(resultsDir, 'core-bench.json'), JSON.stringify(results, null, 2));
   if (process.env.RUN_ID) {
-    fs.writeFileSync(path.join(resultsDir, `core-bench-run-${process.env.RUN_ID}.json`), JSON.stringify(results, null, 2));
+    fs.writeFileSync(
+      path.join(resultsDir, `core-bench-${mode}-run-${process.env.RUN_ID}.json`),
+      JSON.stringify(results, null, 2)
+    );
   }
 
   // Console output formatted report
@@ -89,20 +99,27 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batch
   const totalFlushSum = persistenceTelemetry.stages.totalFlushDuration.sumMs || 1;
 
   console.log('\n========================================================================================');
-  console.log(`  EXCHANGE CORE PERSISTENCE BENCHMARK RESULTS`);
+  console.log(`  EXCHANGE CORE PERSISTENCE BENCHMARK RESULTS [MODE: ${mode.toUpperCase()}]`);
   console.log('========================================================================================');
-  console.log(`  Throughput:                 ${throughputOps.toLocaleString()} orders/sec`);
-  console.log(`  Duration:                   ${totalDurationMs} ms (${(totalDurationMs / 1000).toFixed(2)} s)`);
-  console.log(`  Reconciliation:             ${recReport.balanced ? 'CLEAN (100% Balanced)' : 'IMBALANCED'}`);
-  console.log(`  Total Flushes:              ${flushes} batches`);
-  console.log(`  Avg Batch Size:             ${(iterations / flushes).toFixed(1)} commands/batch`);
-  console.log(`  Peak In-Memory Queue Depth: ${dispatchTelemetry.maxCommandQueueDepth} commands`);
-  console.log(`  Peak Persistence Queue:     ${persistenceTelemetry.counts.maxQueueDepth} batches`);
-  console.log(`  Failed Txns / Rollbacks:    ${persistenceTelemetry.counts.failedTransactions} / ${persistenceTelemetry.counts.rollbacks}`);
+  console.log(`  Throughput:                    ${throughputOps.toLocaleString()} orders/sec`);
+  console.log(`  Wall-Clock Run Duration:       ${totalDurationMs} ms (${(totalDurationMs / 1000).toFixed(2)} s)`);
+  console.log(`  Cumulative Flush Time:         ${totalFlushSum.toFixed(2)} ms`);
+  console.log(`  Reconciliation:                ${recReport.balanced ? 'CLEAN (100% Balanced)' : 'IMBALANCED'}`);
+  console.log(`  Heap Used Delta:               ${heapUsedDeltaMb} MB`);
+  console.log(`  Total Flushes:                 ${flushes} batches`);
+  console.log(`  Avg Batch Size:                ${(iterations / flushes).toFixed(1)} commands/batch`);
+  console.log(`  Peak In-Memory Queue Depth:    ${dispatchTelemetry.maxCommandQueueDepth} commands`);
+  console.log(`  Peak Persistence Queue Depth:  ${persistenceTelemetry.counts.maxQueueDepth} batches`);
+  console.log(`  Failed Txns / Rollbacks:       ${persistenceTelemetry.counts.failedTransactions} / ${persistenceTelemetry.counts.rollbacks}`);
 
-  console.log('\n--- PERSISTENCE STAGE BREAKDOWN ---');
+  const qWait = persistenceTelemetry.stages.queueWait;
+  console.log(`\n--- ORDER QUEUE LATENCY (INGESTION -> FLUSH START) ---`);
+  console.log(`  Cumulative Order-Wait Sum:     ${qWait.sumMs.toFixed(2)} ms (across ${qWait.count} orders)`);
+  console.log(`  Per-Order Mean Queue Wait:     ${qWait.meanMs.toFixed(2)} ms`);
+  console.log(`  Per-Order P50 / P95 / P99:     ${qWait.p50Ms.toFixed(2)} / ${qWait.p95Ms.toFixed(2)} / ${qWait.p99Ms.toFixed(2)} ms`);
+
+  console.log('\n--- BATCH PERSISTENCE STAGES (CUMULATIVE & PER-BATCH) ---');
   const stageRows: Array<{ name: string; st: any; pct?: number }> = [
-    { name: 'Queue Wait (enqueue -> flush)', st: persistenceTelemetry.stages.queueWait },
     { name: '1. Acquire DB Connection', st: persistenceTelemetry.stages.acquireConnection, pct: persistenceTelemetry.breakdownPct.acquireConnectionPct },
     { name: '2. BEGIN Transaction', st: persistenceTelemetry.stages.begin, pct: persistenceTelemetry.breakdownPct.beginPct },
     { name: '3. Coalesce Deltas in RAM', st: persistenceTelemetry.stages.coalesceRam, pct: persistenceTelemetry.breakdownPct.coalesceRamPct },
@@ -120,11 +137,11 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batch
 
   console.log(
     '| ' +
-      'Stage'.padEnd(34) +
+      'Persistence Flush Stage'.padEnd(34) +
       ' | ' +
-      'Sum (ms)'.padStart(10) +
+      'Cumul (ms)'.padStart(10) +
       ' | ' +
-      'Mean (ms)'.padStart(10) +
+      'Mean/Bat(ms)'.padStart(12) +
       ' | ' +
       'P50 (ms)'.padStart(9) +
       ' | ' +
@@ -135,7 +152,7 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batch
       '% Flush'.padStart(8) +
       ' |'
   );
-  console.log('|' + '-'.repeat(36) + '|' + '-'.repeat(12) + '|' + '-'.repeat(12) + '|' + '-'.repeat(11) + '|' + '-'.repeat(11) + '|' + '-'.repeat(11) + '|' + '-'.repeat(10) + '|');
+  console.log('|' + '-'.repeat(36) + '|' + '-'.repeat(12) + '|' + '-'.repeat(14) + '|' + '-'.repeat(11) + '|' + '-'.repeat(11) + '|' + '-'.repeat(11) + '|' + '-'.repeat(10) + '|');
 
   for (const row of stageRows) {
     const pctStr = row.pct !== undefined ? `${row.pct.toFixed(2)}%` : '-';
@@ -145,7 +162,7 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 200, batch
         ' | ' +
         row.st.sumMs.toFixed(2).padStart(10) +
         ' | ' +
-        row.st.meanMs.toFixed(2).padStart(10) +
+        row.st.meanMs.toFixed(2).padStart(12) +
         ' | ' +
         row.st.p50Ms.toFixed(2).padStart(9) +
         ' | ' +

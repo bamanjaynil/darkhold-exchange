@@ -339,23 +339,53 @@ export class PersistenceEngine {
       this.sqlJournalsMs.push(performance.now() - tJournals);
       this.totalJournalsCount += allJournals.length;
 
-      // Execute Bulk Insert Postings (in chunks of 500)
+      // Execute Bulk Insert Postings
       const tPostings = performance.now();
-      const P_CHUNK = 500;
-      for (let i = 0; i < allPostings.length; i += P_CHUNK) {
-        const chunk = allPostings.slice(i, i + P_CHUNK);
-        const values: any[] = [];
-        const rows = chunk.map((p, idx) => {
-          const base = idx * 5;
-          values.push(p.journalId, p.accountId, p.unit, p.amount, p.seq);
-          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
-        });
-        await client.query(
-          `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
-           VALUES ${rows.join(', ')}`,
-          values
-        );
-        this.queryCountPostings++;
+      const postingsMode = process.env.POSTINGS_WRITE_MODE || 'values';
+
+      if (allPostings.length > 0) {
+        if (postingsMode === 'unnest') {
+          const journalIds: string[] = [];
+          const accountIds: string[] = [];
+          const units: string[] = [];
+          const amounts: number[] = [];
+          const seqs: number[] = [];
+
+          for (let i = 0; i < allPostings.length; i++) {
+            const p = allPostings[i]!;
+            journalIds.push(p.journalId);
+            accountIds.push(p.accountId);
+            units.push(p.unit);
+            amounts.push(p.amount);
+            seqs.push(p.seq);
+          }
+
+          await client.query({
+            name: 'insert_postings_unnest',
+            text: `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
+                   SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::bigint[], $5::bigint[])`,
+            values: [journalIds, accountIds, units, amounts, seqs],
+          });
+          this.queryCountPostings++;
+        } else {
+          // 'values' mode (chunked multi-row INSERT at 300 rows)
+          const P_CHUNK = 300;
+          for (let i = 0; i < allPostings.length; i += P_CHUNK) {
+            const chunk = allPostings.slice(i, i + P_CHUNK);
+            const values: any[] = [];
+            const rows = chunk.map((p, idx) => {
+              const base = idx * 5;
+              values.push(p.journalId, p.accountId, p.unit, p.amount, p.seq);
+              return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+            });
+            await client.query(
+              `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
+               VALUES ${rows.join(', ')}`,
+              values
+            );
+            this.queryCountPostings++;
+          }
+        }
       }
       this.sqlPostingsMs.push(performance.now() - tPostings);
       this.totalPostingsCount += allPostings.length;

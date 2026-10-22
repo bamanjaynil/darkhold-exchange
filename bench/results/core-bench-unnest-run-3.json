@@ -1,0 +1,200 @@
+{
+  "benchmark": "ExchangeCore with Group-Commit Persistence (Instrumented)",
+  "timestamp": "2026-10-22T20:45:47.313Z",
+  "config": {
+    "batchMax": 200,
+    "batchMs": 5,
+    "iterations": 5000,
+    "postingsWriteMode": "unnest"
+  },
+  "metrics": {
+    "totalOrders": 5000,
+    "durationMs": 1863,
+    "throughputOpsSec": 2684,
+    "avgLatencyMs": 0.37,
+    "postReconciliationBalanced": true,
+    "heapUsedDeltaMb": 32.6
+  },
+  "dispatchTelemetry": {
+    "maxCommandQueueDepth": 4999,
+    "totalCommandsDispatched": 5000,
+    "totalCommandsRejected": 0,
+    "commandExecution": {
+      "count": 5000,
+      "sumMs": 62.96,
+      "meanMs": 0.01,
+      "p50Ms": 0.01,
+      "p95Ms": 0.01,
+      "p99Ms": 0.07,
+      "maxMs": 6.1
+    }
+  },
+  "persistenceTelemetry": {
+    "counts": {
+      "flushes": 25,
+      "totalCommands": 5000,
+      "totalJournals": 7500,
+      "totalPostings": 15000,
+      "totalBalanceUpdates": 0,
+      "totalHoldingUpdates": 25,
+      "totalOrdersUpserted": 5000,
+      "totalTradesInserted": 0,
+      "totalAuctionsUpserted": 0,
+      "totalEscrowsUpserted": 0,
+      "totalAuditEvents": 0,
+      "queryCountBegin": 25,
+      "queryCountJournals": 25,
+      "queryCountPostings": 25,
+      "queryCountBalances": 0,
+      "queryCountHoldings": 25,
+      "queryCountOrders": 25,
+      "queryCountTrades": 0,
+      "queryCountAuctions": 0,
+      "queryCountEscrows": 0,
+      "queryCountAudit": 0,
+      "queryCountCommit": 25,
+      "queryCountRollback": 0,
+      "totalQueriesExecuted": 150,
+      "maxQueueDepth": 4800,
+      "failedTransactions": 0,
+      "rollbacks": 0
+    },
+    "stages": {
+      "queueWait": {
+        "count": 5000,
+        "sumMs": 4426618.34,
+        "meanMs": 885.32,
+        "p50Ms": 875.25,
+        "p95Ms": 1658.96,
+        "p99Ms": 1727.42,
+        "maxMs": 1727.82
+      },
+      "acquireConnection": {
+        "count": 25,
+        "sumMs": 58.24,
+        "meanMs": 2.33,
+        "p50Ms": 0.04,
+        "p95Ms": 0.15,
+        "p99Ms": 56.9,
+        "maxMs": 56.9
+      },
+      "begin": {
+        "count": 25,
+        "sumMs": 24.2,
+        "meanMs": 0.97,
+        "p50Ms": 0.92,
+        "p95Ms": 1.33,
+        "p99Ms": 1.57,
+        "maxMs": 1.57
+      },
+      "coalesceRam": {
+        "count": 25,
+        "sumMs": 6.08,
+        "meanMs": 0.24,
+        "p50Ms": 0.22,
+        "p95Ms": 0.48,
+        "p99Ms": 0.53,
+        "maxMs": 0.53
+      },
+      "sqlJournals": {
+        "count": 25,
+        "sumMs": 210.94,
+        "meanMs": 8.44,
+        "p50Ms": 8.33,
+        "p95Ms": 9.49,
+        "p99Ms": 11.76,
+        "maxMs": 11.76
+      },
+      "sqlPostings": {
+        "count": 25,
+        "sumMs": 635.96,
+        "meanMs": 25.44,
+        "p50Ms": 25.07,
+        "p95Ms": 30.3,
+        "p99Ms": 31.13,
+        "maxMs": 31.13
+      },
+      "sqlBalances": {
+        "count": 25,
+        "sumMs": 0.09,
+        "meanMs": 0,
+        "p50Ms": 0,
+        "p95Ms": 0.01,
+        "p99Ms": 0.01,
+        "maxMs": 0.01
+      },
+      "sqlHoldings": {
+        "count": 25,
+        "sumMs": 43.89,
+        "meanMs": 1.76,
+        "p50Ms": 1.63,
+        "p95Ms": 2.22,
+        "p99Ms": 3.15,
+        "maxMs": 3.15
+      },
+      "sqlOrders": {
+        "count": 25,
+        "sumMs": 489.28,
+        "meanMs": 19.57,
+        "p50Ms": 19.16,
+        "p95Ms": 23.16,
+        "p99Ms": 25.85,
+        "maxMs": 25.85
+      },
+      "sqlTrades": {
+        "count": 25,
+        "sumMs": 0.01,
+        "meanMs": 0,
+        "p50Ms": 0,
+        "p95Ms": 0,
+        "p99Ms": 0,
+        "maxMs": 0
+      },
+      "sqlMisc": {
+        "count": 25,
+        "sumMs": 1.3,
+        "meanMs": 0.05,
+        "p50Ms": 0.05,
+        "p95Ms": 0.07,
+        "p99Ms": 0.13,
+        "maxMs": 0.13
+      },
+      "commit": {
+        "count": 25,
+        "sumMs": 378.13,
+        "meanMs": 15.13,
+        "p50Ms": 14.29,
+        "p95Ms": 20.67,
+        "p99Ms": 35.26,
+        "maxMs": 35.26
+      },
+      "postCommitCallbacks": {
+        "count": 25,
+        "sumMs": 2.69,
+        "meanMs": 0.11,
+        "p50Ms": 0.09,
+        "p95Ms": 0.21,
+        "p99Ms": 0.22,
+        "maxMs": 0.22
+      },
+      "totalFlushDuration": {
+        "count": 25,
+        "sumMs": 1852.05,
+        "meanMs": 74.08,
+        "p50Ms": 70.44,
+        "p95Ms": 90,
+        "p99Ms": 132.82,
+        "maxMs": 132.82
+      }
+    },
+    "breakdownPct": {
+      "acquireConnectionPct": 3.14,
+      "beginPct": 1.31,
+      "coalesceRamPct": 0.33,
+      "allSqlQueriesPct": 74.59,
+      "commitPct": 20.42,
+      "postCommitCallbacksPct": 0.15,
+      "otherFlushPct": 0.07
+    }
+  }
+}
