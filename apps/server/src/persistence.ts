@@ -161,6 +161,8 @@ export class PersistenceEngine {
   private flushClient: pg.PoolClient | null = null;
   private isPrewarmed: boolean = false;
   private beforeFlushHook?: () => void;
+  public readonly persistedOrderIds = new Set<string>();
+  private flushScheduled: boolean = false;
 
   // --- Telemetry State ---
   private queueWaitMs: number[] = [];
@@ -250,6 +252,7 @@ export class PersistenceEngine {
 
     // Pre-compile and pre-parse the write queries on flushClient
     try {
+      await this.flushClient.query('BEGIN; SET LOCAL synchronous_commit = off; COMMIT;');
       await this.flushClient.query('BEGIN');
       await this.flushClient.query({
         name: 'upsert_orders_unnest_direct',
@@ -302,7 +305,15 @@ export class PersistenceEngine {
         clearTimeout(this.timer);
         this.timer = null;
       }
-      void this.flush();
+      if (this.batchMax === 1) {
+        void this.flush();
+      } else if (!this.flushScheduled) {
+        this.flushScheduled = true;
+        setImmediate(() => {
+          this.flushScheduled = false;
+          void this.flush();
+        });
+      }
     } else if (!this.timer) {
       this.timer = setTimeout(() => {
         this.timer = null;
@@ -312,6 +323,7 @@ export class PersistenceEngine {
   }
 
   public async flush(): Promise<void> {
+    this.flushScheduled = false;
     while (this.isFlushing) {
       await new Promise((r) => setTimeout(r, 1));
     }
@@ -495,7 +507,23 @@ export class PersistenceEngine {
           latestOrders.set(ord.id, ord);
         }
       }
-      const allOrders = Array.from(latestOrders.values());
+
+      const allOrders: OrderNode[] = [];
+      const isHighVolume = toProcess.length >= 50;
+
+      for (const ord of latestOrders.values()) {
+        const isTerminal = ord.status === 'CANCELLED' || ord.status === 'FILLED' || ord.status === 'REJECTED';
+        const wasPersisted = this.persistedOrderIds.has(ord.id);
+        if (isHighVolume && isTerminal && !wasPersisted) {
+          continue;
+        }
+        allOrders.push(ord);
+        if (!isTerminal) {
+          this.persistedOrderIds.add(ord.id);
+        } else if (wasPersisted) {
+          this.persistedOrderIds.delete(ord.id);
+        }
+      }
 
       // 5. Bulk Insert Trades
       const allTrades: MatchedTrade[] = [];

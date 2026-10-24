@@ -92,6 +92,7 @@ async function hydrateFromDb(core: ExchangeCore, client: pg.PoolClient): Promise
   core.holdings.clear();
   core.auctions.clear();
   core.escrows.clear();
+  core.persistence.persistedOrderIds.clear();
 
   // Load Max Seq
   const { rows: seqRows } = await client.query<{ max_seq: string }>(`
@@ -162,6 +163,7 @@ async function hydrateFromDb(core: ExchangeCore, client: pg.PoolClient): Promise
   `);
 
   for (const o of orderRows) {
+    core.persistence.persistedOrderIds.add(o.id);
     const cmd: EngineOrderCommand = {
       id: o.id,
       clientOrderId: o.client_order_id,
