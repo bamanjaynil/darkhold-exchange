@@ -18,6 +18,8 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 500, batch
   const mode = process.env.POSTINGS_WRITE_MODE || 'unnest';
   console.log(`[BENCH:CORE] Setting up test database (POSTINGS_WRITE_MODE=${mode})...`);
   const pool = await setupTestDatabase();
+  const warmupClient = await pool.connect();
+  warmupClient.release();
   const clock = new SystemClock();
 
   console.log(`[BENCH:CORE] Bootstrapping ExchangeCore (PERSIST_BATCH_MAX=${effectiveBatchMax}, PERSIST_BATCH_MS=${batchMs})...`);
@@ -28,6 +30,7 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 500, batch
   if (global.gc) global.gc();
   const initialMemory = process.memoryUsage();
   const startTime = Date.now();
+  const ackStartTime = Date.now();
   const promises: Promise<any>[] = [];
 
   for (let i = 1; i <= iterations; i++) {
@@ -52,12 +55,15 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 500, batch
   }
 
   await Promise.all(promises);
+  const ackDurationMs = Date.now() - ackStartTime;
+  const ackThroughputOps = Math.round((iterations / Math.max(1, ackDurationMs)) * 1000);
+
   await core.persistence.flush();
 
   const totalDurationMs = Date.now() - startTime;
   const finalMemory = process.memoryUsage();
   const heapUsedDeltaMb = Math.round(((finalMemory.heapUsed - initialMemory.heapUsed) / (1024 * 1024)) * 100) / 100;
-  const throughputOps = Math.round((iterations / totalDurationMs) * 1000);
+  const throughputOps = Math.round((iterations / Math.max(1, totalDurationMs)) * 1000);
 
   console.log('[BENCH:CORE] Running post-benchmark double-entry ledger reconciliation...');
   const recReport = await runReconciliation(pool, core);
@@ -103,8 +109,8 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 500, batch
   console.log('\n========================================================================================');
   console.log(`  EXCHANGE CORE PERSISTENCE BENCHMARK RESULTS [MODE: ${mode.toUpperCase()}]`);
   console.log('========================================================================================');
-  console.log(`  Throughput:                    ${throughputOps.toLocaleString()} orders/sec`);
-  console.log(`  Wall-Clock Run Duration:       ${totalDurationMs} ms (${(totalDurationMs / 1000).toFixed(2)} s)`);
+  console.log(`  AOL Ack / Critical-Path Speed: ${ackThroughputOps.toLocaleString()} orders/sec (${ackDurationMs} ms)`);
+  console.log(`  End-to-End Flushed Throughput: ${throughputOps.toLocaleString()} orders/sec (${totalDurationMs} ms)`);
   console.log(`  Cumulative Flush Time:         ${totalFlushSum.toFixed(2)} ms`);
   console.log(`  Reconciliation:                ${recReport.balanced ? 'CLEAN (100% Balanced)' : 'IMBALANCED'}`);
   console.log(`  Heap Used Delta:               ${heapUsedDeltaMb} MB`);

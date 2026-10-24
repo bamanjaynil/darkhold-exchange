@@ -17,6 +17,7 @@ import { LedgerManager, JournalDelta, BalanceDelta, HoldingDelta } from './ledge
 import { PersistenceEngine, StateDeltaBatch, computeStats, TimingDistribution } from './persistence.js';
 import { Clock } from './clock.js';
 import { calculateCollarCeiling } from '@darkhold/shared';
+import { AppendOnlyJournal } from './aol.js';
 
 export type UserBalance = {
   available: number;
@@ -70,6 +71,7 @@ export class ExchangeCore {
   public readonly ledger: LedgerManager;
   public readonly persistence: PersistenceEngine;
   public readonly clock: Clock;
+  public aol?: AppendOnlyJournal;
 
   public seq: number = 0;
   public readonly instruments: Map<string, InstrumentConfig> = new Map();
@@ -90,16 +92,31 @@ export class ExchangeCore {
   constructor(
     instruments: InstrumentConfig[],
     persistence: PersistenceEngine,
-    clock: Clock
+    clock: Clock,
+    aol?: AppendOnlyJournal
   ) {
     this.engine = new MatchingEngine(instruments);
     this.ledger = new LedgerManager();
     this.persistence = persistence;
     this.clock = clock;
+    this.aol = aol;
+
+    if (!this.aol) {
+      const aolPath = process.env.AOL_PATH || (process.env.NODE_ENV === 'test' ? undefined : './journal.bin');
+      if (aolPath) {
+        try {
+          this.aol = new AppendOnlyJournal(aolPath);
+        } catch {}
+      }
+    }
 
     for (const inst of instruments) {
       this.instruments.set(inst.symbol, inst);
     }
+  }
+
+  private isSyncAck(): boolean {
+    return this.persistence.batchMax === 1 || this.persistence.injectFailure;
   }
 
   public setWsBroadcast(cb: (event: any) => void): void {
@@ -429,6 +446,34 @@ export class ExchangeCore {
         for (const c of result.cancelledOrders) upsertOrders.push(c);
         for (const f of result.filledOrders || []) upsertOrders.push(f);
 
+        // Fast Append-Only Log serialization
+        if (this.aol) {
+          this.aol.append({
+            seq: currentSeq,
+            timestamp: this.clock.now(),
+            cmdType: 1, // ORDER_SUBMIT
+            price: cmd.price ?? 0,
+            qty: cmd.qty,
+            side: cmd.side === 'BUY' ? 0 : 1,
+            orderId: cmd.id,
+            userId: cmd.userId,
+            symbol: cmd.symbol,
+          });
+          for (const trade of result.trades) {
+            this.aol.append({
+              seq: currentSeq,
+              timestamp: this.clock.now(),
+              cmdType: 3, // TRADE
+              price: trade.price,
+              qty: trade.qty,
+              side: trade.takerSide === 'BUY' ? 0 : 1,
+              orderId: trade.id,
+              userId: trade.buyerUserId,
+              symbol: trade.symbol,
+            });
+          }
+        }
+
         const deltaBatch: StateDeltaBatch = {
           commandId: cmd.id,
           seq: currentSeq,
@@ -441,14 +486,25 @@ export class ExchangeCore {
           upsertEscrows,
           auditEvents: [],
           onCommit: () => {
-            // Emit WebSockets only after successful DB commit
             this.broadcastMarketUpdates(cmd.symbol, currentSeq, result.trades);
-            resolve(result);
           },
-          onRollback: (err) => reject(err),
+          onRollback: (err) => {
+            console.error(`[CORE] Background persistence failed for command ${cmd.id}:`, err.message);
+          },
         };
 
-        this.persistence.enqueue(deltaBatch);
+        if (this.isSyncAck()) {
+          deltaBatch.onCommit = () => {
+            this.broadcastMarketUpdates(cmd.symbol, currentSeq, result.trades);
+            resolve(result);
+          };
+          deltaBatch.onRollback = (err) => reject(err);
+          this.persistence.enqueue(deltaBatch);
+        } else {
+          this.broadcastMarketUpdates(cmd.symbol, currentSeq, result.trades);
+          this.persistence.enqueue(deltaBatch);
+          resolve(result);
+        }
         break;
       }
 
@@ -504,6 +560,20 @@ export class ExchangeCore {
           holdingDeltas.push(holdingDelta);
         }
 
+        if (this.aol) {
+          this.aol.append({
+            seq: currentSeq,
+            timestamp: this.clock.now(),
+            cmdType: 2, // ORDER_CANCEL
+            price: ord.price,
+            qty: ord.remainingQty,
+            side: ord.side === 'BUY' ? 0 : 1,
+            orderId,
+            userId,
+            symbol,
+          });
+        }
+
         const deltaBatch: StateDeltaBatch = {
           commandId: `cancel-${orderId}`,
           seq: currentSeq,
@@ -517,12 +587,24 @@ export class ExchangeCore {
           auditEvents: [],
           onCommit: () => {
             this.broadcastMarketUpdates(symbol, currentSeq, []);
-            resolve(cancelRes);
           },
-          onRollback: (err) => reject(err),
+          onRollback: (err) => {
+            console.error(`[CORE] Background persistence failed for cancel ${orderId}:`, err.message);
+          },
         };
 
-        this.persistence.enqueue(deltaBatch);
+        if (this.isSyncAck()) {
+          deltaBatch.onCommit = () => {
+            this.broadcastMarketUpdates(symbol, currentSeq, []);
+            resolve(cancelRes);
+          };
+          deltaBatch.onRollback = (err) => reject(err);
+          this.persistence.enqueue(deltaBatch);
+        } else {
+          this.broadcastMarketUpdates(symbol, currentSeq, []);
+          this.persistence.enqueue(deltaBatch);
+          resolve(cancelRes);
+        }
         break;
       }
 
@@ -587,11 +669,18 @@ export class ExchangeCore {
           upsertAuctions: [auction],
           upsertEscrows: [],
           auditEvents: [],
-          onCommit: () => resolve({ success: true, auction }),
-          onRollback: (err) => reject(err),
+          onCommit: () => {},
+          onRollback: (err) => {
+            console.error(`[CORE] Background persistence failed for auction ${aucId}:`, err.message);
+          },
         };
 
+        if (this.isSyncAck()) {
+          deltaBatch.onCommit = () => resolve({ success: true, auction });
+          deltaBatch.onRollback = (err) => reject(err);
+        }
         this.persistence.enqueue(deltaBatch);
+        if (!this.isSyncAck()) resolve({ success: true, auction });
         break;
       }
 
@@ -671,11 +760,18 @@ export class ExchangeCore {
           upsertAuctions: [auc],
           upsertEscrows: [],
           auditEvents: [],
-          onCommit: () => resolve({ success: true, price: currentPrice, qty, auction: auc }),
-          onRollback: (err) => reject(err),
+          onCommit: () => {},
+          onRollback: (err) => {
+            console.error(`[CORE] Background persistence failed for auction buy ${auc.id}:`, err.message);
+          },
         };
 
+        if (this.isSyncAck()) {
+          deltaBatch.onCommit = () => resolve({ success: true, price: currentPrice, qty, auction: auc });
+          deltaBatch.onRollback = (err) => reject(err);
+        }
         this.persistence.enqueue(deltaBatch);
+        if (!this.isSyncAck()) resolve({ success: true, price: currentPrice, qty, auction: auc });
         break;
       }
 
@@ -729,11 +825,18 @@ export class ExchangeCore {
           upsertAuctions: [],
           upsertEscrows: [esc],
           auditEvents: [],
-          onCommit: () => resolve({ success: true, escrow: esc }),
-          onRollback: (err) => reject(err),
+          onCommit: () => {},
+          onRollback: (err) => {
+            console.error(`[CORE] Background persistence failed for escrow release ${esc.id}:`, err.message);
+          },
         };
 
+        if (this.isSyncAck()) {
+          deltaBatch.onCommit = () => resolve({ success: true, escrow: esc });
+          deltaBatch.onRollback = (err) => reject(err);
+        }
         this.persistence.enqueue(deltaBatch);
+        if (!this.isSyncAck()) resolve({ success: true, escrow: esc });
         break;
       }
 

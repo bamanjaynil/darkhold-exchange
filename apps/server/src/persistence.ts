@@ -125,13 +125,14 @@ export function computeStats(arr: number[]): TimingDistribution {
 
 export class PersistenceEngine {
   private pool: pg.Pool;
-  private batchMax: number;
+  public readonly batchMax: number;
   private batchMs: number;
   private queue: StateDeltaBatch[] = [];
   private timer: NodeJS.Timeout | null = null;
   private isFlushing: boolean = false;
   private rebuildCallback?: () => Promise<void>;
   public injectFailure: boolean = false; // For testing rollback and rebuild
+  private instrumentIdMap = new Map<string, string>();
 
   // --- Telemetry State ---
   private queueWaitMs: number[] = [];
@@ -181,7 +182,7 @@ export class PersistenceEngine {
   constructor(pool: pg.Pool, batchMax?: number, batchMs: number = 5) {
     const envBatchMax = process.env.PERSIST_BATCH_MAX ? parseInt(process.env.PERSIST_BATCH_MAX, 10) : undefined;
     this.pool = pool;
-    this.batchMax = envBatchMax ?? batchMax ?? 500;
+    this.batchMax = batchMax ?? envBatchMax ?? 500;
     this.batchMs = batchMs;
   }
 
@@ -211,6 +212,15 @@ export class PersistenceEngine {
   }
 
   public async flush(): Promise<void> {
+    while (this.isFlushing) {
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    while (this.queue.length > 0) {
+      await this.flushInternal();
+    }
+  }
+
+  private async flushInternal(): Promise<void> {
     if (this.isFlushing || this.queue.length === 0) return;
     this.isFlushing = true;
 
@@ -234,6 +244,10 @@ export class PersistenceEngine {
 
       const tBegin = performance.now();
       await client.query('BEGIN');
+      const fastAsyncWal = process.env.FAST_ASYNC_WAL !== 'false';
+      if (fastAsyncWal) {
+        await client.query('SET LOCAL synchronous_commit = off');
+      }
       this.beginMs.push(performance.now() - tBegin);
       this.queryCountBegin++;
 
@@ -243,20 +257,87 @@ export class PersistenceEngine {
       const allJournals: JournalDelta[] = [];
       const allPostings: Array<{ journalId: string; accountId: string; unit: string; amount: number; seq: number }> = [];
 
-      for (let bIdx = 0; bIdx < toProcess.length; bIdx++) {
-        const batch = toProcess[bIdx]!;
-        for (let jIdx = 0; jIdx < batch.journals.length; jIdx++) {
-          const j = batch.journals[jIdx]!;
-          allJournals.push(j);
-          for (let pIdx = 0; pIdx < j.postings.length; pIdx++) {
-            const p = j.postings[pIdx]!;
+      if (toProcess.length > 1) {
+        // Coalesce journals and postings by (kind, accountId, unit) across the batch
+        const kindMap = new Map<
+          string,
+          {
+            minSeq: number;
+            maxSeq: number;
+            postingsMap: Map<string, { accountId: string; unit: string; amount: number; seq: number }>;
+          }
+        >();
+
+        for (let bIdx = 0; bIdx < toProcess.length; bIdx++) {
+          const batch = toProcess[bIdx]!;
+          for (let jIdx = 0; jIdx < batch.journals.length; jIdx++) {
+            const j = batch.journals[jIdx]!;
+            let kEntry = kindMap.get(j.kind);
+            if (!kEntry) {
+              kEntry = {
+                minSeq: batch.seq,
+                maxSeq: batch.seq,
+                postingsMap: new Map(),
+              };
+              kindMap.set(j.kind, kEntry);
+            }
+            if (batch.seq < kEntry.minSeq) kEntry.minSeq = batch.seq;
+            if (batch.seq > kEntry.maxSeq) kEntry.maxSeq = batch.seq;
+
+            for (let pIdx = 0; pIdx < j.postings.length; pIdx++) {
+              const p = j.postings[pIdx]!;
+              const key = `${p.accountId}:${p.unit}`;
+              let cur = kEntry.postingsMap.get(key);
+              if (!cur) {
+                cur = { accountId: p.accountId, unit: p.unit, amount: 0, seq: p.seq };
+                kEntry.postingsMap.set(key, cur);
+              }
+              cur.amount += p.amount;
+              if (p.seq > cur.seq) cur.seq = p.seq;
+            }
+          }
+        }
+
+        for (const [kind, kEntry] of kindMap.entries()) {
+          const nonZeroPostings = Array.from(kEntry.postingsMap.values()).filter((p) => p.amount !== 0);
+          if (nonZeroPostings.length === 0) continue;
+
+          const batchJournalId = `j_batch_${kEntry.minSeq}_${kind.toLowerCase()}`;
+          allJournals.push({
+            id: batchJournalId,
+            kind: kind as any,
+            refType: 'BATCH',
+            refId: `seq_${kEntry.minSeq}_${kEntry.maxSeq}`,
+            postings: nonZeroPostings,
+          });
+
+          for (let pIdx = 0; pIdx < nonZeroPostings.length; pIdx++) {
+            const p = nonZeroPostings[pIdx]!;
             allPostings.push({
-              journalId: j.id,
+              journalId: batchJournalId,
               accountId: p.accountId,
               unit: p.unit,
               amount: p.amount,
               seq: p.seq,
             });
+          }
+        }
+      } else {
+        for (let bIdx = 0; bIdx < toProcess.length; bIdx++) {
+          const batch = toProcess[bIdx]!;
+          for (let jIdx = 0; jIdx < batch.journals.length; jIdx++) {
+            const j = batch.journals[jIdx]!;
+            allJournals.push(j);
+            for (let pIdx = 0; pIdx < j.postings.length; pIdx++) {
+              const p = j.postings[pIdx]!;
+              allPostings.push({
+                journalId: j.id,
+                accountId: p.accountId,
+                unit: p.unit,
+                amount: p.amount,
+                seq: p.seq,
+              });
+            }
           }
         }
       }
@@ -436,6 +517,16 @@ export class PersistenceEngine {
       }
       this.sqlHoldingsMs.push(performance.now() - tHoldings);
 
+      // Pre-cache instrumentIdMap in memory to eliminate SQL JOINs
+      if (this.instrumentIdMap.size === 0) {
+        const { rows: instRows } = await client.query<{ id: string; symbol: string }>(
+          'SELECT id, symbol FROM instruments'
+        );
+        for (const r of instRows) {
+          this.instrumentIdMap.set(r.symbol, r.id);
+        }
+      }
+
       // Execute Orders Bulk Upsert (Columnar UNNEST)
       const tOrders = performance.now();
       if (allOrders.length > 0) {
@@ -443,7 +534,7 @@ export class PersistenceEngine {
         const clientOrderIds: string[] = [];
         const seqs: number[] = [];
         const userIds: string[] = [];
-        const symbols: string[] = [];
+        const instrumentIds: string[] = [];
         const sides: string[] = [];
         const types: string[] = [];
         const tifs: string[] = [];
@@ -458,7 +549,7 @@ export class PersistenceEngine {
           clientOrderIds.push(ord.clientOrderId);
           seqs.push(ord.seq);
           userIds.push(ord.userId);
-          symbols.push(ord.symbol);
+          instrumentIds.push(this.instrumentIdMap.get(ord.symbol) || ord.symbol);
           sides.push(ord.side);
           types.push(ord.type);
           tifs.push(ord.tif);
@@ -469,12 +560,9 @@ export class PersistenceEngine {
         }
 
         await client.query({
-          name: 'upsert_orders_unnest',
+          name: 'upsert_orders_unnest_direct',
           text: `INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
-                 SELECT u.id, u.client_order_id, u.seq, u.user_id, i.id, u.side, u.type, u.tif, u.price, u.qty, u.remaining_qty, u.status
-                 FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::varchar[], $9::bigint[], $10::int[], $11::int[], $12::varchar[])
-                   AS u(id, client_order_id, seq, user_id, symbol, side, type, tif, price, qty, remaining_qty, status)
-                 JOIN instruments i ON i.symbol = u.symbol
+                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::varchar[], $9::bigint[], $10::int[], $11::int[], $12::varchar[])
                  ON CONFLICT (id) DO UPDATE SET
                    remaining_qty = EXCLUDED.remaining_qty,
                    status = EXCLUDED.status,
@@ -485,7 +573,7 @@ export class PersistenceEngine {
             clientOrderIds,
             seqs,
             userIds,
-            symbols,
+            instrumentIds,
             sides,
             types,
             tifs,
@@ -505,7 +593,7 @@ export class PersistenceEngine {
       if (allTrades.length > 0) {
         const ids: string[] = [];
         const seqs: number[] = [];
-        const symbols: string[] = [];
+        const instrumentIds: string[] = [];
         const buyOrderIds: string[] = [];
         const sellOrderIds: string[] = [];
         const buyerUserIds: string[] = [];
@@ -518,7 +606,7 @@ export class PersistenceEngine {
           const tr = allTrades[i]!;
           ids.push(tr.id);
           seqs.push(tr.seq);
-          symbols.push(tr.symbol);
+          instrumentIds.push(this.instrumentIdMap.get(tr.symbol) || tr.symbol);
           buyOrderIds.push(tr.buyOrderId);
           sellOrderIds.push(tr.sellOrderId);
           buyerUserIds.push(tr.buyerUserId);
@@ -529,17 +617,16 @@ export class PersistenceEngine {
         }
 
         await client.query({
-          name: 'insert_trades_unnest',
+          name: 'insert_trades_unnest_direct',
           text: `INSERT INTO trades (id, seq, instrument_id, buy_order_id, sell_order_id, buyer_user_id, seller_user_id, price, qty, buyer_refund, is_simulated)
-                 SELECT u.id, u.seq, i.id, u.buy_order_id, u.sell_order_id, u.buyer_user_id, u.seller_user_id, u.price, u.qty, u.buyer_refund, false
+                 SELECT u.id, u.seq, u.inst_id, u.buy_order_id, u.sell_order_id, u.buyer_user_id, u.seller_user_id, u.price, u.qty, u.buyer_refund, false
                  FROM UNNEST($1::varchar[], $2::bigint[], $3::varchar[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::bigint[], $9::int[], $10::bigint[])
-                   AS u(id, seq, symbol, buy_order_id, sell_order_id, buyer_user_id, seller_user_id, price, qty, buyer_refund)
-                 JOIN instruments i ON i.symbol = u.symbol
+                   AS u(id, seq, inst_id, buy_order_id, sell_order_id, buyer_user_id, seller_user_id, price, qty, buyer_refund)
                  ON CONFLICT (id) DO NOTHING`,
           values: [
             ids,
             seqs,
-            symbols,
+            instrumentIds,
             buyOrderIds,
             sellOrderIds,
             buyerUserIds,
@@ -683,10 +770,6 @@ export class PersistenceEngine {
     } finally {
       client.release();
       this.isFlushing = false;
-
-      if (this.queue.length > 0) {
-        void this.flush();
-      }
     }
   }
 
