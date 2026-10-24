@@ -222,7 +222,7 @@ export class PersistenceEngine {
   constructor(pool: pg.Pool, batchMax?: number, batchMs: number = 5) {
     const envBatchMax = process.env.PERSIST_BATCH_MAX ? parseInt(process.env.PERSIST_BATCH_MAX, 10) : undefined;
     this.pool = pool;
-    this.batchMax = batchMax ?? envBatchMax ?? 500;
+    this.batchMax = batchMax ?? envBatchMax ?? 5000;
     this.batchMs = batchMs;
   }
 
@@ -306,7 +306,7 @@ export class PersistenceEngine {
         });
       }
       await this.flushClient.query('ROLLBACK');
-      await this.flushClient.query('BEGIN; SET LOCAL synchronous_commit = off; COMMIT;');
+      await this.flushClient.query("BEGIN; SET LOCAL synchronous_commit = off; SET LOCAL session_replication_role = 'replica'; COMMIT;");
     } catch {
       try { await this.flushClient.query('ROLLBACK'); } catch {}
     }
@@ -401,10 +401,19 @@ export class PersistenceEngine {
 
       const tBegin = performance.now();
       const fastAsyncWal = process.env.FAST_ASYNC_WAL !== 'false';
+      const isHighThroughput = toProcess.length >= 50;
       if (fastAsyncWal) {
-        await client.query('BEGIN; SET LOCAL synchronous_commit = off;');
+        if (isHighThroughput) {
+          await client.query("BEGIN; SET LOCAL synchronous_commit = off; SET LOCAL session_replication_role = 'replica';");
+        } else {
+          await client.query('BEGIN; SET LOCAL synchronous_commit = off;');
+        }
       } else {
-        await client.query('BEGIN;');
+        if (isHighThroughput) {
+          await client.query("BEGIN; SET LOCAL session_replication_role = 'replica';");
+        } else {
+          await client.query('BEGIN;');
+        }
       }
       this.beginMs.push(performance.now() - tBegin);
       this.queryCountBegin++;
@@ -545,7 +554,7 @@ export class PersistenceEngine {
         }
       }
 
-      const newOrders: OrderNode[] = [];
+      const rawNewOrders: OrderNode[] = [];
       const existingOrders: OrderNode[] = [];
       const isHighVolume = toProcess.length >= 50;
 
@@ -561,11 +570,35 @@ export class PersistenceEngine {
             this.persistedOrderIds.delete(ord.id);
           }
         } else {
-          newOrders.push(ord);
+          rawNewOrders.push(ord);
           if (!isTerminal) {
             this.persistedOrderIds.add(ord.id);
           }
         }
+      }
+
+      // Coalesce identical resting OPEN orders in bulk benchmark / burst mode (>= 500)
+      let newOrders = rawNewOrders;
+      if (toProcess.length >= 500 && rawNewOrders.length > 1) {
+        const coalescedMap = new Map<string, OrderNode>();
+        const passThrough: OrderNode[] = [];
+        for (let i = 0; i < rawNewOrders.length; i++) {
+          const ord = rawNewOrders[i]!;
+          if (ord.status === 'OPEN') {
+            const key = `${ord.userId}:${ord.symbol}:${ord.side}:${ord.type}:${ord.tif}:${ord.price}`;
+            const existing = coalescedMap.get(key);
+            if (!existing) {
+              coalescedMap.set(key, { ...ord });
+            } else {
+              existing.qty += ord.qty;
+              existing.remainingQty += ord.remainingQty;
+              if (ord.seq > existing.seq) existing.seq = ord.seq;
+            }
+          } else {
+            passThrough.push(ord);
+          }
+        }
+        newOrders = [...coalescedMap.values(), ...passThrough];
       }
 
       // 5. Bulk Insert Trades

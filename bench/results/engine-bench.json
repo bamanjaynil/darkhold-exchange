@@ -1,6 +1,6 @@
 {
   "benchmark": "In-Process Pure Matching Engine",
-  "timestamp": "2026-10-24T20:37:08.484Z",
+  "timestamp": "2026-10-24T20:45:37.679Z",
   "host": {
     "platform": "linux",
     "arch": "x64",
@@ -11,14 +11,14 @@
   "metrics": {
     "totalOrders": 50000,
     "tradesExecuted": 28932,
-    "durationMs": 122.14,
-    "throughputOpsSec": 409372,
+    "durationMs": 125.44,
+    "throughputOpsSec": 398608,
     "latency": {
       "unit": "microseconds",
-      "p50": 0.86,
-      "p95": 2.98,
-      "p99": 7.09,
-      "max": 11164.09
+      "p50": 0.81,
+      "p95": 2.84,
+      "p99": 7.19,
+      "max": 11214.03
     }
   }
 }

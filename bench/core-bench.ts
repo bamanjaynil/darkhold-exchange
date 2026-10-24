@@ -12,7 +12,7 @@ import { bootstrapCore } from '../apps/server/src/recovery.js';
 import { SystemClock } from '../apps/server/src/clock.js';
 import { runReconciliation } from '../apps/server/src/reconciliation.js';
 
-export async function runCoreBenchmark(iterations = 5_000, batchMax = 500, batchMs = 5) {
+export async function runCoreBenchmark(iterations = 5_000, batchMax = 5000, batchMs = 5) {
   const envBatchMax = process.env.PERSIST_BATCH_MAX ? parseInt(process.env.PERSIST_BATCH_MAX, 10) : undefined;
   const effectiveBatchMax = envBatchMax ?? batchMax;
   const mode = process.env.POSTINGS_WRITE_MODE || 'unnest';
@@ -30,8 +30,8 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 500, batch
 
   if (global.gc) global.gc();
   const initialMemory = process.memoryUsage();
-  const startTime = Date.now();
-  const ackStartTime = Date.now();
+  const startTime = performance.now();
+  const ackStartTime = performance.now();
   const promises: Promise<any>[] = [];
 
   for (let i = 1; i <= iterations; i++) {
@@ -56,12 +56,12 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 500, batch
   }
 
   await Promise.all(promises);
-  const ackDurationMs = Date.now() - ackStartTime;
+  const ackDurationMs = performance.now() - ackStartTime;
   const ackThroughputOps = Math.round((iterations / Math.max(1, ackDurationMs)) * 1000);
 
   await core.persistence.flush();
 
-  const totalDurationMs = Date.now() - startTime;
+  const totalDurationMs = performance.now() - startTime;
   const finalMemory = process.memoryUsage();
   const heapUsedDeltaMb = Math.round(((finalMemory.heapUsed - initialMemory.heapUsed) / (1024 * 1024)) * 100) / 100;
   const throughputOps = Math.round((iterations / Math.max(1, totalDurationMs)) * 1000);

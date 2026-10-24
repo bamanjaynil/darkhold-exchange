@@ -33,7 +33,7 @@ const ConfigSchema = z.object({
   REGISTRATION_ENABLED: z.preprocess((val) => val === 'true' || val === true, z.boolean()).default(true),
   STARTER_GRANT_DKC: z.coerce.number().int().nonnegative().default(100000), // 1,000.00 DKC
 
-  PERSIST_BATCH_MAX: z.coerce.number().int().min(1).default(500),
+  PERSIST_BATCH_MAX: z.coerce.number().int().min(1).default(5000),
   PERSIST_BATCH_MS: z.coerce.number().int().min(1).default(5),
 
   POW_REQUIRED: z.preprocess((val) => val === 'true' || val === true, z.boolean()).default(true),
