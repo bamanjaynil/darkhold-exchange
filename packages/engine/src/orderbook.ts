@@ -19,6 +19,9 @@ import {
 } from './types.js';
 import { calculateCollarCeiling } from '@darkhold/shared';
 
+const EMPTY_TRADES: MatchedTrade[] = Object.freeze([]) as any;
+const EMPTY_ORDERS: OrderNode[] = Object.freeze([]) as any;
+
 export class OrderBook {
   public readonly instrument: InstrumentConfig;
   public readonly ceiling: number;
@@ -31,6 +34,8 @@ export class OrderBook {
   private levels: Map<number, PriceLevel> = new Map();
   private ordersById: Map<string, OrderNode> = new Map();
   private clientOrderHistory: Map<string, EngineResult> = new Map();
+  private lastLevelPrice: number = -1;
+  private lastLevel?: PriceLevel;
 
   constructor(instrument: InstrumentConfig) {
     this.instrument = instrument;
@@ -54,7 +59,7 @@ export class OrderBook {
    */
   public processOrder(cmd: EngineOrderCommand): EngineResult {
     // 1. Idempotency Check per user
-    const idempKey = `${cmd.userId}:${cmd.clientOrderId}`;
+    const idempKey = cmd.userId + ':' + cmd.clientOrderId;
     const existingResult = this.clientOrderHistory.get(idempKey);
     if (existingResult) {
       return {
@@ -68,8 +73,8 @@ export class OrderBook {
       const errRes: EngineResult = {
         success: false,
         seq: cmd.seq,
-        trades: [],
-        cancelledOrders: [],
+        trades: EMPTY_TRADES,
+        cancelledOrders: EMPTY_ORDERS,
         rejectedReason: 'UNSUPPORTED_COMBINATION',
       };
       this.recordClientOrder(idempKey, errRes);
@@ -110,6 +115,56 @@ export class OrderBook {
     }
 
     // 6. Matching Execution
+    const isBuy = cmd.side === 'BUY';
+    const bestOppositePrice = isBuy ? this.getBestAsk() : this.getBestBid();
+
+    // Fast-path STP Check: If top of opposite book belongs to the same user and crosses price
+    if (bestOppositePrice !== null) {
+      const isCrossed = isBuy
+        ? (cmd.type === 'MARKET' || bestOppositePrice <= orderPrice) && bestOppositePrice <= this.ceiling
+        : (cmd.type === 'MARKET' || bestOppositePrice >= orderPrice);
+
+      if (isCrossed) {
+        const level = (bestOppositePrice === this.lastLevelPrice && this.lastLevel)
+          ? this.lastLevel
+          : this.levels.get(bestOppositePrice);
+        if (level && level.head !== null && level.head.userId === cmd.userId) {
+          this.lastLevelPrice = bestOppositePrice;
+          this.lastLevel = level;
+          const cancelledNode: OrderNode = {
+            id: cmd.id,
+            clientOrderId: cmd.clientOrderId,
+            seq: cmd.seq,
+            userId: cmd.userId,
+            symbol: cmd.symbol,
+            side: cmd.side,
+            type: cmd.type,
+            tif: cmd.tif,
+            price: orderPrice,
+            qty: cmd.qty,
+            remainingQty: cmd.qty,
+            filledQty: 0,
+            status: 'CANCELLED',
+            createdAtSeq: cmd.seq,
+            next: null,
+            prev: null,
+          };
+          const result: EngineResult = {
+            success: true,
+            orderId: cmd.id,
+            seq: cmd.seq,
+            status: 'CANCELLED',
+            trades: EMPTY_TRADES,
+            restingOrder: undefined,
+            cancelledOrders: [cancelledNode],
+            filledOrders: EMPTY_ORDERS,
+          };
+          this.recordClientOrder(idempKey, result);
+          return result;
+        }
+      }
+    }
+
     const incoming: OrderNode = {
       id: cmd.id,
       clientOrderId: cmd.clientOrderId,
@@ -129,12 +184,10 @@ export class OrderBook {
       prev: null,
     };
 
-    const trades: MatchedTrade[] = [];
-    const cancelledOrders: OrderNode[] = [];
-    const filledOrders: OrderNode[] = [];
+    let trades: MatchedTrade[] | undefined;
+    let cancelledOrders: OrderNode[] | undefined;
+    let filledOrders: OrderNode[] | undefined;
     let tradeCounter = 1;
-
-    const isBuy = incoming.side === 'BUY';
 
     while (incoming.remainingQty > 0) {
       const bestOppositePrice = isBuy ? this.getBestAsk() : this.getBestBid();
@@ -148,7 +201,12 @@ export class OrderBook {
         if (incoming.type === 'LIMIT' && bestOppositePrice < incoming.price) break;
       }
 
-      const level = this.levels.get(bestOppositePrice)!;
+      const level = (bestOppositePrice === this.lastLevelPrice && this.lastLevel)
+        ? this.lastLevel
+        : this.levels.get(bestOppositePrice)!;
+      this.lastLevelPrice = bestOppositePrice;
+      this.lastLevel = level;
+
       let resting = level.head;
 
       while (resting !== null && incoming.remainingQty > 0) {
@@ -156,6 +214,7 @@ export class OrderBook {
         if (resting.userId === incoming.userId) {
           // Cancel incoming remainder immediately (never rests); leave resting order untouched
           incoming.status = incoming.filledQty > 0 ? 'PARTIALLY_FILLED' : 'CANCELLED';
+          if (!cancelledOrders) cancelledOrders = [];
           cancelledOrders.push({ ...incoming });
           incoming.remainingQty = 0;
           break;
@@ -171,6 +230,7 @@ export class OrderBook {
         }
 
         const tradeId = `${cmd.id}-t-${tradeCounter++}`;
+        if (!trades) trades = [];
         trades.push({
           id: tradeId,
           seq: cmd.seq,
@@ -196,11 +256,13 @@ export class OrderBook {
 
         if (resting.remainingQty === 0) {
           resting.status = 'FILLED';
+          if (!filledOrders) filledOrders = [];
           filledOrders.push({ ...resting });
           this.removeOrderFromLevel(resting, level);
           this.ordersById.delete(resting.id);
         } else {
           resting.status = 'PARTIALLY_FILLED';
+          if (!filledOrders) filledOrders = [];
           filledOrders.push({ ...resting });
         }
 
@@ -228,6 +290,7 @@ export class OrderBook {
         // IOC or MARKET orders cancel unfilled remainder immediately
         finalStatus = incoming.filledQty > 0 ? 'PARTIALLY_FILLED' : 'CANCELLED';
         incoming.status = finalStatus;
+        if (!cancelledOrders) cancelledOrders = [];
         cancelledOrders.push({ ...incoming });
       }
     } else {
@@ -239,10 +302,10 @@ export class OrderBook {
       orderId: cmd.id,
       seq: cmd.seq,
       status: incoming.status,
-      trades,
+      trades: trades || EMPTY_TRADES,
       restingOrder,
-      cancelledOrders,
-      filledOrders,
+      cancelledOrders: cancelledOrders || EMPTY_ORDERS,
+      filledOrders: filledOrders || EMPTY_ORDERS,
     };
 
     this.recordClientOrder(idempKey, result);
@@ -258,13 +321,13 @@ export class OrderBook {
       return {
         success: false,
         seq,
-        trades: [],
-        cancelledOrders: [],
+        trades: EMPTY_TRADES,
+        cancelledOrders: EMPTY_ORDERS,
         rejectedReason: 'ORDER_NOT_FOUND',
       };
     }
 
-    const level = this.levels.get(node.price);
+    const level = (node.price === this.lastLevelPrice && this.lastLevel) ? this.lastLevel : this.levels.get(node.price);
     if (level) {
       this.removeOrderFromLevel(node, level);
       if (level.orderCount === 0) {
@@ -280,8 +343,8 @@ export class OrderBook {
       orderId,
       seq,
       status: 'CANCELLED',
-      trades: [],
-      cancelledOrders: [node],
+      trades: EMPTY_TRADES,
+      cancelledOrders: [{ ...node }],
     };
   }
 
@@ -374,7 +437,7 @@ export class OrderBook {
   }
 
   private insertRestingOrder(node: OrderNode): void {
-    let level = this.levels.get(node.price);
+    let level = (node.price === this.lastLevelPrice && this.lastLevel) ? this.lastLevel : this.levels.get(node.price);
     if (!level) {
       level = {
         price: node.price,
@@ -386,6 +449,8 @@ export class OrderBook {
       this.levels.set(node.price, level);
       this.insertSortedPrice(node.price, node.side === 'BUY');
     }
+    this.lastLevelPrice = node.price;
+    this.lastLevel = level;
 
     // Append to FIFO doubly-linked list
     if (level.tail === null) {
@@ -443,6 +508,10 @@ export class OrderBook {
 
   private removeLevel(price: number, isBid: boolean): void {
     this.levels.delete(price);
+    if (this.lastLevelPrice === price) {
+      this.lastLevelPrice = -1;
+      this.lastLevel = undefined;
+    }
     const arr = isBid ? this.bids : this.asks;
     const idx = arr.indexOf(price);
     if (idx !== -1) {
@@ -464,8 +533,8 @@ export class OrderBook {
     const res: EngineResult = {
       success: false,
       seq,
-      trades: [],
-      cancelledOrders: [],
+      trades: EMPTY_TRADES,
+      cancelledOrders: EMPTY_ORDERS,
       rejectedReason: reason,
     };
     this.recordClientOrder(idempKey, res);

@@ -28,15 +28,29 @@ export class AppendOnlyJournal {
   public readonly filePath: string;
   private fd: number;
   private writeBuffer: Buffer;
+  private dataView: DataView;
+  private u32View: Uint32Array;
   private bufferOffset: number = 0;
   private readonly bufferCapacity: number;
   private currentSeq: number = 0;
   private isFlushScheduled: boolean = false;
 
+  private lastUserId?: string;
+  private lastUserBuf: Buffer = Buffer.alloc(32, 0);
+  private uW0 = 0; private uW1 = 0; private uW2 = 0; private uW3 = 0;
+  private uW4 = 0; private uW5 = 0; private uW6 = 0; private uW7 = 0;
+
+  private lastSymbol?: string;
+  private lastSymbolBuf: Buffer = Buffer.alloc(24, 0);
+  private sW0 = 0; private sW1 = 0; private sW2 = 0; private sW3 = 0;
+  private sW4 = 0; private sW5 = 0;
+
   constructor(filePath: string, bufferCapacity: number = 4 * 1024 * 1024) {
     this.filePath = filePath;
     this.bufferCapacity = bufferCapacity;
     this.writeBuffer = Buffer.alloc(bufferCapacity, 0);
+    this.dataView = new DataView(this.writeBuffer.buffer, this.writeBuffer.byteOffset, bufferCapacity);
+    this.u32View = new Uint32Array(this.writeBuffer.buffer, this.writeBuffer.byteOffset, bufferCapacity / 4);
     this.fd = fs.openSync(filePath, 'a+');
   }
 
@@ -84,35 +98,84 @@ export class AppendOnlyJournal {
       this.flushSync();
     }
 
+    const dv = this.dataView;
     const buf = this.writeBuffer;
     let offset = this.bufferOffset;
 
     // Header (16 bytes)
-    buf.writeUInt32BE(AOL_MAGIC, offset);
-    buf.writeBigUInt64BE(BigInt(seq), offset + 4);
-    buf.writeUInt32BE(cmdType, offset + 12);
+    dv.setUint32(offset, AOL_MAGIC);
+    dv.setUint32(offset + 4, 0);
+    dv.setUint32(offset + 8, seq);
+    dv.setUint32(offset + 12, cmdType);
     offset += 16;
 
     // Numerical Data (24 bytes)
-    buf.writeBigInt64BE(BigInt(timestamp), offset);
-    buf.writeBigInt64BE(BigInt(price), offset + 8);
-    buf.writeUInt32BE(qty, offset + 16);
-    buf.writeUInt8(side, offset + 20);
+    dv.setUint32(offset, Math.floor(timestamp / 4294967296));
+    dv.setUint32(offset + 4, timestamp >>> 0);
+    dv.setUint32(offset + 8, Math.floor(price / 4294967296));
+    dv.setUint32(offset + 12, price >>> 0);
+    dv.setUint32(offset + 16, qty);
+    dv.setUint8(offset + 20, side);
     offset += 24;
 
     // Fixed-length Strings (88 bytes)
-    buf.write(orderId, offset, 31, 'utf-8');
+    // 1. orderId (32 bytes)
+    buf.utf8Write(orderId, offset, 31);
     offset += 32;
 
-    buf.write(userId, offset, 31, 'utf-8');
+    // 2. userId (32 bytes = 8 words)
+    let wOff = offset >> 2;
+    if (userId !== this.lastUserId) {
+      this.lastUserBuf.fill(0);
+      this.lastUserBuf.utf8Write(userId, 0, 31);
+      const tempView = new Uint32Array(this.lastUserBuf.buffer, this.lastUserBuf.byteOffset, 8);
+      this.uW0 = tempView[0]!;
+      this.uW1 = tempView[1]!;
+      this.uW2 = tempView[2]!;
+      this.uW3 = tempView[3]!;
+      this.uW4 = tempView[4]!;
+      this.uW5 = tempView[5]!;
+      this.uW6 = tempView[6]!;
+      this.uW7 = tempView[7]!;
+      this.lastUserId = userId;
+    }
+    const u32 = this.u32View;
+    u32[wOff] = this.uW0;
+    u32[wOff + 1] = this.uW1;
+    u32[wOff + 2] = this.uW2;
+    u32[wOff + 3] = this.uW3;
+    u32[wOff + 4] = this.uW4;
+    u32[wOff + 5] = this.uW5;
+    u32[wOff + 6] = this.uW6;
+    u32[wOff + 7] = this.uW7;
     offset += 32;
+    wOff += 8;
 
-    buf.write(symbol, offset, 23, 'utf-8');
-    offset += 24;
+    // 3. symbol (24 bytes = 6 words)
+    if (symbol !== this.lastSymbol) {
+      this.lastSymbolBuf.fill(0);
+      this.lastSymbolBuf.utf8Write(symbol, 0, 23);
+      const tempView = new Uint32Array(this.lastSymbolBuf.buffer, this.lastSymbolBuf.byteOffset, 6);
+      this.sW0 = tempView[0]!;
+      this.sW1 = tempView[1]!;
+      this.sW2 = tempView[2]!;
+      this.sW3 = tempView[3]!;
+      this.sW4 = tempView[4]!;
+      this.sW5 = tempView[5]!;
+      this.lastSymbol = symbol;
+    }
+    u32[wOff] = this.sW0;
+    u32[wOff + 1] = this.sW1;
+    u32[wOff + 2] = this.sW2;
+    u32[wOff + 3] = this.sW3;
+    u32[wOff + 4] = this.sW4;
+    u32[wOff + 5] = this.sW5;
 
     this.bufferOffset += AOL_RECORD_SIZE;
     this.currentSeq = seq;
-    this.scheduleFlush();
+    if (!this.isFlushScheduled) {
+      this.scheduleFlush();
+    }
   }
 
   /**
@@ -124,6 +187,11 @@ export class AppendOnlyJournal {
       this.writeBuffer.fill(0, 0, this.bufferOffset);
       this.bufferOffset = 0;
     }
+  }
+
+  public reset(): void {
+    this.bufferOffset = 0;
+    this.isFlushScheduled = false;
   }
 
   /**

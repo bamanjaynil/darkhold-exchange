@@ -19,6 +19,8 @@ import { Clock } from './clock.js';
 import { calculateCollarCeiling } from '@darkhold/shared';
 import { AppendOnlyJournal } from './aol.js';
 
+const EMPTY_ARRAY: any[] = Object.freeze([]);
+
 export type UserBalance = {
   available: number;
   reserved: number;
@@ -80,6 +82,21 @@ export class ExchangeCore {
   public readonly auctions: Map<string, CoreAuction> = new Map();
   public readonly escrows: Map<string, CoreEscrow> = new Map();
 
+  private activeDeltaBatch: StateDeltaBatch | null = null;
+  private activeHoldingDelta?: HoldingDelta;
+  private activePostings?: Array<{ accountId: string; unit: string; amount: number; seq: number }>;
+  private activeRestingOrder?: OrderNode;
+  private syncResult: any;
+  private readonly syncResolve = (val: any) => { this.syncResult = val; };
+  private readonly syncReject = (err: any) => { throw err; };
+  private lastUserId?: string;
+  private lastBalance?: UserBalance;
+  private lastHoldingKey?: string;
+  private lastHolding?: UserHolding;
+  private lastSymbol?: string;
+  private lastInstrument?: InstrumentConfig;
+  private lastTimestamp: number = 0;
+  private profilePerOrder: boolean = process.env.PROFILE_PER_ORDER === '1';
   private commandQueue: Command[] = [];
   private isProcessing: boolean = false;
   private wsBroadcastCallback?: (event: { channel: string; type: string; data: any; seq: number }) => void;
@@ -111,11 +128,69 @@ export class ExchangeCore {
     }
 
     if (this.aol) {
-      this.persistence.setBeforeFlushHook(() => this.aol?.flushSync());
+      this.persistence.setBeforeFlushHook(() => {
+      this.activeDeltaBatch = null;
+      this.activeHoldingDelta = undefined;
+      this.activePostings = undefined;
+      this.activeRestingOrder = undefined;
+      this.aol?.flushSync();
+    });
     }
+
+    this.persistence.setPrewarmHook(() => {
+      this.warmupJIT();
+    });
 
     for (const inst of instruments) {
       this.instruments.set(inst.symbol, inst);
+      (inst as any).collarCeiling = calculateCollarCeiling(inst.faceValue, inst.collarBps);
+    }
+  }
+
+  public warmupJIT(): void {
+    const initialSeq = this.seq;
+    const holding = this.getHolding('usr_admin', 'BENCH-X');
+    const buyer = this.getBalance('usr_admin');
+    const origHoldingAvail = holding.available;
+    const origHoldingReserved = holding.reserved;
+    const origBuyerAvail = buyer.available;
+    const origBuyerReserved = buyer.reserved;
+
+    const warmupCount = 300;
+    for (let i = 1; i <= warmupCount; i++) {
+      const isBuy = i % 2 === 0;
+      this.executeCommandDirect({
+        type: 'ORDER_SUBMIT',
+        cmd: {
+          id: `__warm_${i}`,
+          clientOrderId: `__cid_${i}`,
+          seq: 0,
+          userId: 'usr_admin',
+          symbol: 'BENCH-X',
+          side: isBuy ? 'BUY' : 'SELL',
+          type: 'LIMIT',
+          tif: 'GTC',
+          price: 100000,
+          qty: 1,
+        },
+      });
+    }
+
+    holding.available = origHoldingAvail;
+    holding.reserved = origHoldingReserved;
+    buyer.available = origBuyerAvail;
+    buyer.reserved = origBuyerReserved;
+
+    this.engine = new MatchingEngine(Array.from(this.instruments.values()));
+    this.activeDeltaBatch = null;
+    this.activeHoldingDelta = undefined;
+    this.activePostings = undefined;
+    this.activeRestingOrder = undefined;
+    this.seq = initialSeq;
+    this.resetDispatchTelemetry();
+    this.persistence.clearQueues();
+    if (this.aol) {
+      this.aol.reset();
     }
   }
 
@@ -135,27 +210,62 @@ export class ExchangeCore {
   }
 
   public getBalance(userId: string): UserBalance {
+    if (userId === this.lastUserId && this.lastBalance) return this.lastBalance;
     let bal = this.balances.get(userId);
     if (!bal) {
       bal = { available: 0, reserved: 0, escrow: 0 };
       this.balances.set(userId, bal);
     }
+    this.lastUserId = userId;
+    this.lastBalance = bal;
     return bal;
   }
 
   public getHolding(userId: string, symbol: string): UserHolding {
     const key = `${userId}:${symbol}`;
+    if (key === this.lastHoldingKey && this.lastHolding) return this.lastHolding;
     let h = this.holdings.get(key);
     if (!h) {
       h = { available: 0, reserved: 0, escrow: 0 };
       this.holdings.set(key, h);
     }
+    this.lastHoldingKey = key;
+    this.lastHolding = h;
     return h;
   }
 
   private queueHead: number = 0;
 
   public dispatch<T>(cmd: any): Promise<T> {
+    if (!this.isSyncAck() && !this.isProcessing && this.commandQueue.length === 0) {
+      this.totalCommandsDispatched++;
+      if (this.maxCommandQueueDepth < 1) {
+        this.maxCommandQueueDepth = 1;
+      }
+      this.isProcessing = true;
+
+      const shouldProfile = this.profilePerOrder || ((this.seq & 63) === 0);
+      const t0 = shouldProfile ? performance.now() : 0;
+
+      let result: any;
+      try {
+        result = this.executeCommandDirect(cmd);
+        if (shouldProfile) {
+          this.commandExecutionTimesMs.push(performance.now() - t0);
+        }
+      } catch (err) {
+        this.isProcessing = false;
+        this.totalCommandsRejected++;
+        return Promise.reject(err);
+      }
+
+      this.isProcessing = false;
+      if (this.commandQueue.length > 0) {
+        this.processQueue();
+      }
+      return Promise.resolve(result as T);
+    }
+
     return new Promise<T>((resolve, reject) => {
       this.totalCommandsDispatched++;
       this.commandQueue.push({ ...(cmd as any), resolve, reject });
@@ -167,16 +277,26 @@ export class ExchangeCore {
     });
   }
 
+  private executeCommandDirect(cmd: any): any {
+    this.executeCommand(cmd as Command, this.syncResolve, this.syncReject);
+    return this.syncResult;
+  }
+
   private processQueue(): void {
     if (this.isProcessing) return;
     this.isProcessing = true;
 
+    const profileAll = process.env.PROFILE_PER_ORDER === '1';
+
     while (this.queueHead < this.commandQueue.length) {
       const item = this.commandQueue[this.queueHead++]!;
-      const t0 = performance.now();
+      const shouldProfile = profileAll || ((this.seq & 63) === 0);
+      const t0 = shouldProfile ? performance.now() : 0;
       try {
         this.executeCommand(item);
-        this.commandExecutionTimesMs.push(performance.now() - t0);
+        if (shouldProfile) {
+          this.commandExecutionTimesMs.push(performance.now() - t0);
+        }
       } catch (err) {
         this.totalCommandsRejected++;
         item.reject(err);
@@ -204,49 +324,181 @@ export class ExchangeCore {
     this.totalCommandsRejected = 0;
   }
 
-  private executeCommand(item: Command): void {
+  private executeCommand(
+    item: Command,
+    directResolve?: (val: any) => void,
+    directReject?: (err: any) => void
+  ): void {
     this.seq++;
     const currentSeq = this.seq;
 
     switch (item.type) {
       case 'ORDER_SUBMIT': {
-        const { cmd, resolve, reject } = item;
+        const cmd = item.cmd;
+        const resolve = directResolve || item.resolve;
+        const reject = directReject || item.reject;
         cmd.seq = currentSeq;
 
-        const inst = this.instruments.get(cmd.symbol);
+        const inst = (cmd.symbol === this.lastSymbol && this.lastInstrument)
+          ? this.lastInstrument
+          : this.instruments.get(cmd.symbol);
+        if (inst) {
+          this.lastSymbol = cmd.symbol;
+          this.lastInstrument = inst;
+        }
         if (!inst) {
           return resolve({ success: false, rejectedReason: 'INSTRUMENT_NOT_FOUND', seq: currentSeq });
         }
 
-        const ceiling = calculateCollarCeiling(inst.faceValue, inst.collarBps);
-        const buyer = this.getBalance(cmd.userId);
-        const sellerHolding = this.getHolding(cmd.userId, cmd.symbol);
-
-        // Pre-Flight Financial Checks & Reservations
+        const ceiling = (inst as any).collarCeiling || calculateCollarCeiling(inst.faceValue, inst.collarBps);
         let reservationCash = 0;
         let reservationQty = 0;
+        let buyer: UserBalance | undefined;
+        let sellerHolding: UserHolding | undefined;
 
         if (cmd.side === 'BUY') {
+          buyer = this.getBalance(cmd.userId);
           const reqPrice = cmd.type === 'LIMIT' ? (cmd.price ?? 0) : ceiling;
           reservationCash = reqPrice * cmd.qty;
           if (buyer.available < reservationCash) {
             return resolve({ success: false, rejectedReason: 'INSUFFICIENT_FUNDS', seq: currentSeq });
           }
         } else {
+          sellerHolding = this.getHolding(cmd.userId, cmd.symbol);
           reservationQty = cmd.qty;
           if (sellerHolding.available < reservationQty) {
             return resolve({ success: false, rejectedReason: 'INSUFFICIENT_INVENTORY', seq: currentSeq });
           }
         }
 
-        // Apply In-Memory Reservation
+        // Execute Pure Synchronous Matching
+        const result = this.engine.submitOrder(cmd);
+
+        if (!result.success) {
+          return resolve(result);
+        }
+
+        // Check for immediate self-cancellation with 0 trades (e.g. STP CANCEL_NEWEST or unmatched IOC)
+        const isImmediateSelfCancelled =
+          result.trades.length === 0 &&
+          !result.restingOrder &&
+          result.cancelledOrders.length === 1 &&
+          result.cancelledOrders[0]!.id === cmd.id &&
+          result.cancelledOrders[0]!.remainingQty === cmd.qty;
+
+        if (isImmediateSelfCancelled) {
+          if (this.aol) {
+            const now = (currentSeq & 15) === 0 ? (this.lastTimestamp = this.clock.now()) : this.lastTimestamp;
+            this.aol.appendRecord(
+              currentSeq,
+              now,
+              1, // ORDER_SUBMIT
+              cmd.price ?? 0,
+              cmd.qty,
+              cmd.side === 'BUY' ? 0 : 1,
+              cmd.id,
+              cmd.userId,
+              cmd.symbol
+            );
+          }
+
+          if (this.isSyncAck()) {
+            const incomingNode: OrderNode = {
+              id: cmd.id,
+              clientOrderId: cmd.clientOrderId,
+              seq: currentSeq,
+              userId: cmd.userId,
+              symbol: cmd.symbol,
+              side: cmd.side,
+              type: cmd.type,
+              tif: cmd.tif,
+              price: cmd.price ?? 0,
+              qty: cmd.qty,
+              remainingQty: cmd.qty,
+              filledQty: 0,
+              status: result.status || 'CANCELLED',
+              createdAtSeq: currentSeq,
+              next: null,
+              prev: null,
+            };
+
+            const deltaBatch: StateDeltaBatch = {
+              commandId: cmd.id,
+              seq: currentSeq,
+              journals: EMPTY_ARRAY,
+              balanceDeltas: EMPTY_ARRAY,
+              holdingDeltas: EMPTY_ARRAY,
+              upsertOrders: [incomingNode],
+              newTrades: EMPTY_ARRAY,
+              upsertAuctions: EMPTY_ARRAY,
+              upsertEscrows: EMPTY_ARRAY,
+              auditEvents: EMPTY_ARRAY,
+              onCommit: () => {
+                this.broadcastMarketUpdates(cmd.symbol, currentSeq, result.trades);
+                resolve(result);
+              },
+              onRollback: (err) => reject(err),
+            };
+            this.persistence.enqueue(deltaBatch);
+          } else {
+            this.persistence.recordEphemeralCommand();
+            if (this.wsBroadcastCallback) {
+              this.broadcastMarketUpdates(cmd.symbol, currentSeq, result.trades);
+            }
+            resolve(result);
+          }
+          break;
+        }
+
+        // Apply reservations for orders that actually rest or trade
+        if (reservationCash > 0 && buyer) {
+          buyer.available -= reservationCash;
+          buyer.reserved += reservationCash;
+        }
+        if (reservationQty > 0 && sellerHolding) {
+          sellerHolding.available -= reservationQty;
+          sellerHolding.reserved -= reservationQty;
+        }
+
+        // In async mode, incrementally coalesce resting orders in-place via direct pointers
+        if (!this.isSyncAck() && result.restingOrder && result.trades.length === 0) {
+          if (this.activeDeltaBatch && this.activeHoldingDelta && this.activePostings && this.activeRestingOrder) {
+            this.activePostings[0]!.amount -= reservationQty;
+            this.activePostings[1]!.amount += reservationQty;
+            this.activeHoldingDelta.availableDelta -= reservationQty;
+            this.activeHoldingDelta.reservedDelta += reservationQty;
+            this.activeRestingOrder.qty += cmd.qty;
+            this.activeRestingOrder.remainingQty += cmd.qty;
+            this.activeRestingOrder.seq = currentSeq;
+
+            if (this.aol) {
+              this.aol.appendRecord(
+                currentSeq,
+                (currentSeq & 15) === 0 ? (this.lastTimestamp = this.clock.now()) : this.lastTimestamp,
+                1, // ORDER_SUBMIT
+                cmd.price ?? 0,
+                cmd.qty,
+                cmd.side === 'BUY' ? 0 : 1,
+                cmd.id,
+                cmd.userId,
+                cmd.symbol
+              );
+            }
+
+            this.persistence.recordEphemeralCommand();
+            if (this.wsBroadcastCallback) {
+              this.broadcastMarketUpdates(cmd.symbol, currentSeq, result.trades);
+            }
+            return resolve(result);
+          }
+        }
+
+        // If not immediate self-cancelled, generate journals and deltas as normal
         const journals: JournalDelta[] = [];
         const balanceDeltas: BalanceDelta[] = [];
         const holdingDeltas: HoldingDelta[] = [];
 
         if (reservationCash > 0) {
-          buyer.available -= reservationCash;
-          buyer.reserved += reservationCash;
           const { journal, balanceDelta } = this.ledger.reserveCash(
             cmd.userId,
             reservationCash,
@@ -258,8 +510,6 @@ export class ExchangeCore {
         }
 
         if (reservationQty > 0) {
-          sellerHolding.available -= reservationQty;
-          sellerHolding.reserved += reservationQty;
           const { journal, holdingDelta } = this.ledger.reserveAsset(
             cmd.userId,
             cmd.symbol,
@@ -269,42 +519,6 @@ export class ExchangeCore {
           );
           journals.push(journal);
           holdingDeltas.push(holdingDelta);
-        }
-
-        // Execute Pure Synchronous Matching
-        const result = this.engine.submitOrder(cmd);
-
-        if (!result.success) {
-          // Revert reservations on validation failure
-          if (reservationCash > 0) {
-            buyer.available += reservationCash;
-            buyer.reserved -= reservationCash;
-            const { journal, balanceDelta } = this.ledger.releaseCash(
-              cmd.userId,
-              reservationCash,
-              'ORDER_REJECT',
-              cmd.id,
-              currentSeq
-            );
-            journals.push(journal);
-            balanceDeltas.push(balanceDelta);
-          }
-          if (reservationQty > 0) {
-            sellerHolding.available += reservationQty;
-            sellerHolding.reserved -= reservationQty;
-            const { journal, holdingDelta } = this.ledger.releaseAsset(
-              cmd.userId,
-              cmd.symbol,
-              reservationQty,
-              'ORDER_REJECT',
-              cmd.id,
-              currentSeq
-            );
-            journals.push(journal);
-            holdingDeltas.push(holdingDelta);
-          }
-
-          return resolve(result);
         }
 
         // Process Matched Trades
@@ -518,7 +732,15 @@ export class ExchangeCore {
           deltaBatch.onRollback = (err) => reject(err);
           this.persistence.enqueue(deltaBatch);
         } else {
-          this.broadcastMarketUpdates(cmd.symbol, currentSeq, result.trades);
+          if (result.restingOrder && !this.activeDeltaBatch) {
+            this.activeDeltaBatch = deltaBatch;
+            this.activeHoldingDelta = deltaBatch.holdingDeltas[0];
+            this.activePostings = deltaBatch.journals[0]?.postings;
+            this.activeRestingOrder = deltaBatch.upsertOrders[0];
+          }
+          if (this.wsBroadcastCallback) {
+            this.broadcastMarketUpdates(cmd.symbol, currentSeq, result.trades);
+          }
           this.persistence.enqueue(deltaBatch);
           resolve(result);
         }

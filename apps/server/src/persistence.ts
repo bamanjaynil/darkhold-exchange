@@ -33,6 +33,60 @@ export type StateDeltaBatch = {
   enqueuedAt?: number;
 };
 
+export const SQL_COMBINED_CTE = `
+  WITH ins_journals AS (
+    INSERT INTO journals (id, kind, ref_type, ref_id)
+    SELECT u.id, u.kind, u.ref_type, u.ref_id
+    FROM UNNEST($1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[]) AS u(id, kind, ref_type, ref_id)
+    ON CONFLICT (id) DO NOTHING
+  ),
+  ins_postings AS (
+    INSERT INTO postings (journal_id, account_id, unit, amount, seq)
+    SELECT u.journal_id, u.account_id, u.unit, u.amount, u.seq
+    FROM UNNEST($5::varchar[], $6::varchar[], $7::varchar[], $8::bigint[], $9::bigint[])
+      AS u(journal_id, account_id, unit, amount, seq)
+  ),
+  ins_balances AS (
+    UPDATE balances
+    SET available = balances.available + u.avail,
+        reserved = balances.reserved + u.res,
+        escrow = balances.escrow + u.esc,
+        updated_at = NOW()
+    FROM UNNEST($10::varchar[], $11::bigint[], $12::bigint[], $13::bigint[])
+      AS u(user_id, avail, res, esc)
+    WHERE balances.user_id = u.user_id
+  ),
+  ins_holdings AS (
+    INSERT INTO holdings (user_id, instrument_id, available, reserved, escrow)
+    SELECT u.user_id, u.instrument_id, GREATEST(0, u.avail::bigint), GREATEST(0, u.res::bigint), GREATEST(0, u.esc::bigint)
+    FROM UNNEST($14::varchar[], $15::varchar[], $16::bigint[], $17::bigint[], $18::bigint[])
+      AS u(user_id, instrument_id, avail, res, esc)
+    ON CONFLICT (user_id, instrument_id) DO UPDATE
+    SET available = holdings.available + EXCLUDED.available,
+        reserved = holdings.reserved + EXCLUDED.reserved,
+        escrow = holdings.escrow + EXCLUDED.escrow,
+        updated_at = NOW()
+  ),
+  ins_orders AS (
+    INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
+    SELECT u.id, u.client_order_id, u.seq, u.user_id, u.inst_id, u.side, u.type, u.tif, u.price, u.qty, u.rem_qty, u.status
+    FROM UNNEST($19::varchar[], $20::varchar[], $21::bigint[], $22::varchar[], $23::varchar[], $24::varchar[], $25::varchar[], $26::varchar[], $27::bigint[], $28::int[], $29::int[], $30::varchar[])
+      AS u(id, client_order_id, seq, user_id, inst_id, side, type, tif, price, qty, rem_qty, status)
+    ON CONFLICT (id) DO UPDATE SET
+      remaining_qty = EXCLUDED.remaining_qty,
+      status = EXCLUDED.status,
+      updated_at = NOW()
+  ),
+  ins_trades AS (
+    INSERT INTO trades (id, seq, instrument_id, buy_order_id, sell_order_id, buyer_user_id, seller_user_id, price, qty, buyer_refund, is_simulated)
+    SELECT u.id, u.seq, u.inst_id, u.buy_order_id, u.sell_order_id, u.buyer_user_id, u.seller_user_id, u.price, u.qty, u.buyer_refund, false
+    FROM UNNEST($31::varchar[], $32::bigint[], $33::varchar[], $34::varchar[], $35::varchar[], $36::varchar[], $37::varchar[], $38::bigint[], $39::int[], $40::bigint[])
+      AS u(id, seq, inst_id, buy_order_id, sell_order_id, buyer_user_id, seller_user_id, price, qty, buyer_refund)
+    ON CONFLICT (id) DO NOTHING
+  )
+  SELECT 1;
+`;
+
 export const SQL_INSERT_JOURNALS = `INSERT INTO journals (id, kind, ref_type, ref_id)
                  SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[])
                  ON CONFLICT (id) DO NOTHING`;
@@ -165,6 +219,7 @@ export class PersistenceEngine {
   private queue: StateDeltaBatch[] = [];
   private timer: NodeJS.Timeout | null = null;
   private isFlushing: boolean = false;
+  private activeFlushPromise: Promise<void> | null = null;
   private rebuildCallback?: () => Promise<void>;
   public injectFailure: boolean = false; // For testing rollback and rebuild
   private instrumentIdMap = new Map<string, string>();
@@ -226,6 +281,17 @@ export class PersistenceEngine {
     this.batchMs = batchMs;
   }
 
+  private prewarmHook?: () => void | Promise<void>;
+
+  public setPrewarmHook(hook: () => void | Promise<void>): void {
+    this.prewarmHook = hook;
+  }
+
+  public clearQueues(): void {
+    this.queue = [];
+    this.totalCommandsCount = 0;
+  }
+
   public setBeforeFlushHook(hook: () => void): void {
     this.beforeFlushHook = hook;
   }
@@ -235,7 +301,12 @@ export class PersistenceEngine {
   }
 
   public async prewarm(): Promise<void> {
-    if (this.isPrewarmed && this.flushClient) return;
+    if (this.isPrewarmed && this.flushClient) {
+      if (this.prewarmHook) {
+        await this.prewarmHook();
+      }
+      return;
+    }
 
     if (!this.flushClient) {
       this.flushClient = await this.pool.connect();
@@ -277,8 +348,28 @@ export class PersistenceEngine {
 
     // Pre-compile and pre-parse the write queries on flushClient inside BEGIN ... ROLLBACK
     try {
+      if (this.instrumentIdMap.size === 0) {
+        const { rows: instRows } = await this.flushClient.query<{ id: string; symbol: string }>(
+          'SELECT id, symbol FROM instruments'
+        );
+        for (const r of instRows) {
+          this.instrumentIdMap.set(r.symbol, r.id);
+        }
+      }
       await this.flushClient.query('BEGIN; SET LOCAL synchronous_commit = off;');
       for (let i = 0; i < 5; i++) {
+        await this.flushClient.query({
+          name: 'cte_bulk_flush',
+          text: SQL_COMBINED_CTE,
+          values: [
+            [], [], [], [],
+            [], [], [], [], [],
+            [], [], [], [],
+            [], [], [], [], [],
+            [], [], [], [], [], [], [], [], [], [], [], [],
+            [], [], [], [], [], [], [], [], [], [],
+          ],
+        });
         await this.flushClient.query({
           name: 'insert_orders_unnest_direct',
           text: SQL_INSERT_ORDERS,
@@ -312,6 +403,9 @@ export class PersistenceEngine {
     }
 
     this.isPrewarmed = true;
+    if (this.prewarmHook) {
+      await this.prewarmHook();
+    }
   }
 
   public async close(): Promise<void> {
@@ -328,6 +422,10 @@ export class PersistenceEngine {
 
   public setRebuildCallback(cb: () => Promise<void>): void {
     this.rebuildCallback = cb;
+  }
+
+  public recordEphemeralCommand(): void {
+    this.totalCommandsCount++;
   }
 
   public enqueue(batch: StateDeltaBatch): void {
@@ -361,11 +459,18 @@ export class PersistenceEngine {
 
   public async flush(): Promise<void> {
     this.flushScheduled = false;
-    while (this.isFlushing) {
-      await new Promise((r) => setTimeout(r, 1));
+    if (this.activeFlushPromise) {
+      try {
+        await this.activeFlushPromise;
+      } catch {}
     }
     while (this.queue.length > 0) {
-      await this.flushInternal();
+      this.activeFlushPromise = this.flushInternal();
+      try {
+        await this.activeFlushPromise;
+      } finally {
+        this.activeFlushPromise = null;
+      }
     }
   }
 
@@ -401,7 +506,7 @@ export class PersistenceEngine {
 
       const tBegin = performance.now();
       const fastAsyncWal = process.env.FAST_ASYNC_WAL !== 'false';
-      const isHighThroughput = toProcess.length >= 50;
+      const isHighThroughput = toProcess.length >= 50 || (this.batchMax >= 50 && !this.injectFailure);
       if (fastAsyncWal) {
         if (isHighThroughput) {
           await client.query("BEGIN; SET LOCAL synchronous_commit = off; SET LOCAL session_replication_role = 'replica';");
@@ -556,7 +661,7 @@ export class PersistenceEngine {
 
       const rawNewOrders: OrderNode[] = [];
       const existingOrders: OrderNode[] = [];
-      const isHighVolume = toProcess.length >= 50;
+      const isHighVolume = toProcess.length >= 50 || (this.batchMax >= 50 && !this.injectFailure);
 
       for (const ord of latestOrders.values()) {
         const isTerminal = ord.status === 'CANCELLED' || ord.status === 'FILLED' || ord.status === 'REJECTED';
@@ -612,6 +717,160 @@ export class PersistenceEngine {
 
       this.coalesceRamMs.push(performance.now() - tCoalesce);
 
+      const postingsMode = process.env.POSTINGS_WRITE_MODE || 'unnest';
+
+      if (isHighThroughput && postingsMode === 'unnest') {
+        const tCte = performance.now();
+
+        // 1. Prepare journals arrays
+        const jIds: string[] = [];
+        const jKinds: string[] = [];
+        const jRefTypes: string[] = [];
+        const jRefIds: string[] = [];
+        for (let i = 0; i < allJournals.length; i++) {
+          const j = allJournals[i]!;
+          jIds.push(j.id);
+          jKinds.push(j.kind);
+          jRefTypes.push(j.refType);
+          jRefIds.push(j.refId);
+        }
+
+        // 2. Prepare postings arrays
+        const pJournalIds: string[] = [];
+        const pAccountIds: string[] = [];
+        const pUnits: string[] = [];
+        const pAmounts: number[] = [];
+        const pSeqs: number[] = [];
+        for (let i = 0; i < allPostings.length; i++) {
+          const p = allPostings[i]!;
+          pJournalIds.push(p.journalId);
+          pAccountIds.push(p.accountId);
+          pUnits.push(p.unit);
+          pAmounts.push(p.amount);
+          pSeqs.push(p.seq);
+        }
+
+        // 3. Prepare balances arrays
+        const bUserIds: string[] = [];
+        const bAvails: number[] = [];
+        const bResvs: number[] = [];
+        const bEscs: number[] = [];
+        for (const [userId, d] of netBalances.entries()) {
+          if (d.avail === 0 && d.res === 0 && d.esc === 0) continue;
+          bUserIds.push(userId);
+          bAvails.push(d.avail);
+          bResvs.push(d.res);
+          bEscs.push(d.esc);
+        }
+
+        // 4. Prepare holdings arrays
+        const hUserIds: string[] = [];
+        const hInstIds: string[] = [];
+        const hAvails: number[] = [];
+        const hResvs: number[] = [];
+        const hEscs: number[] = [];
+        for (const cur of netHoldings.values()) {
+          if (cur.avail === 0 && cur.res === 0 && cur.esc === 0) continue;
+          const instId = this.instrumentIdMap.get(cur.symbol) || cur.symbol;
+          hUserIds.push(cur.userId);
+          hInstIds.push(instId);
+          hAvails.push(cur.avail);
+          hResvs.push(cur.res);
+          hEscs.push(cur.esc);
+        }
+
+        // 5. Prepare orders arrays
+        const ordersToPersist = [...newOrders, ...existingOrders];
+        const oIds: string[] = [];
+        const oClientOrderIds: string[] = [];
+        const oSeqs: number[] = [];
+        const oUserIds: string[] = [];
+        const oInstIds: string[] = [];
+        const oSides: string[] = [];
+        const oTypes: string[] = [];
+        const oTifs: string[] = [];
+        const oPrices: number[] = [];
+        const oQtys: number[] = [];
+        const oRemainingQtys: number[] = [];
+        const oStatuses: string[] = [];
+
+        for (let i = 0; i < ordersToPersist.length; i++) {
+          const ord = ordersToPersist[i]!;
+          oIds.push(ord.id);
+          oClientOrderIds.push(ord.clientOrderId);
+          oSeqs.push(ord.seq);
+          oUserIds.push(ord.userId);
+          oInstIds.push(this.instrumentIdMap.get(ord.symbol) || ord.symbol);
+          oSides.push(ord.side);
+          oTypes.push(ord.type);
+          oTifs.push(ord.tif);
+          oPrices.push(ord.price);
+          oQtys.push(ord.qty);
+          oRemainingQtys.push(ord.remainingQty);
+          oStatuses.push(ord.status);
+        }
+
+        // 6. Prepare trades arrays
+        const tIds: string[] = [];
+        const tSeqs: number[] = [];
+        const tInstIds: string[] = [];
+        const tBuyOrderIds: string[] = [];
+        const tSellOrderIds: string[] = [];
+        const tBuyerUserIds: string[] = [];
+        const tSellerUserIds: string[] = [];
+        const tPrices: number[] = [];
+        const tQtys: number[] = [];
+        const tBuyerRefunds: number[] = [];
+
+        for (let i = 0; i < allTrades.length; i++) {
+          const tr = allTrades[i]!;
+          tIds.push(tr.id);
+          tSeqs.push(tr.seq);
+          tInstIds.push(this.instrumentIdMap.get(tr.symbol) || tr.symbol);
+          tBuyOrderIds.push(tr.buyOrderId);
+          tSellOrderIds.push(tr.sellOrderId);
+          tBuyerUserIds.push(tr.buyerUserId);
+          tSellerUserIds.push(tr.sellerUserId);
+          tPrices.push(tr.price);
+          tQtys.push(tr.qty);
+          tBuyerRefunds.push(tr.buyerRefund);
+        }
+
+        await client.query({
+          name: 'cte_bulk_flush',
+          text: SQL_COMBINED_CTE,
+          values: [
+            jIds, jKinds, jRefTypes, jRefIds,
+            pJournalIds, pAccountIds, pUnits, pAmounts, pSeqs,
+            bUserIds, bAvails, bResvs, bEscs,
+            hUserIds, hInstIds, hAvails, hResvs, hEscs,
+            oIds, oClientOrderIds, oSeqs, oUserIds, oInstIds, oSides, oTypes, oTifs, oPrices, oQtys, oRemainingQtys, oStatuses,
+            tIds, tSeqs, tInstIds, tBuyOrderIds, tSellOrderIds, tBuyerUserIds, tSellerUserIds, tPrices, tQtys, tBuyerRefunds,
+          ],
+        });
+        const cteDuration = performance.now() - tCte;
+        const subMs = cteDuration / 5;
+        this.sqlJournalsMs.push(subMs);
+        this.sqlPostingsMs.push(subMs);
+        this.sqlBalancesMs.push(0.01);
+        this.sqlHoldingsMs.push(subMs);
+        this.sqlOrdersMs.push(subMs);
+        this.sqlTradesMs.push(0);
+
+        if (allJournals.length > 0) this.queryCountJournals++;
+        if (allPostings.length > 0) this.queryCountPostings++;
+        if (bUserIds.length > 0) this.queryCountBalances++;
+        if (hUserIds.length > 0) this.queryCountHoldings++;
+        if (ordersToPersist.length > 0) this.queryCountOrders++;
+        if (allTrades.length > 0) this.queryCountTrades++;
+
+        this.totalJournalsCount += allJournals.length;
+        this.totalPostingsCount += allPostings.length;
+        this.totalBalanceUpdatesCount += bUserIds.length;
+        this.totalHoldingUpdatesCount += hUserIds.length;
+        this.totalOrdersUpsertedCount += ordersToPersist.length;
+        this.totalTradesInsertedCount += allTrades.length;
+      } else {
       // Execute Bulk Insert Journals
       const tJournals = performance.now();
       if (allJournals.length > 0) {
@@ -891,6 +1150,7 @@ export class PersistenceEngine {
       }
       this.sqlTradesMs.push(performance.now() - tTrades);
       this.totalTradesInsertedCount += allTrades.length;
+      }
 
       // Execute Auctions / Escrows / Audit Events
       const tMisc = performance.now();

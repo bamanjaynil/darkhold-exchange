@@ -9,6 +9,8 @@ import { OrderBook } from './orderbook.js';
 
 export class MatchingEngine {
   private books: Map<string, OrderBook> = new Map();
+  private lastSymbol?: string;
+  private lastBook?: OrderBook;
 
   constructor(instruments: InstrumentConfig[]) {
     for (const inst of instruments) {
@@ -17,15 +19,27 @@ export class MatchingEngine {
   }
 
   public registerInstrument(inst: InstrumentConfig): void {
-    this.books.set(inst.symbol, new OrderBook(inst));
+    const book = new OrderBook(inst);
+    this.books.set(inst.symbol, book);
+    if (this.lastSymbol === inst.symbol) {
+      this.lastBook = book;
+    }
   }
 
   public getBook(symbol: string): OrderBook | undefined {
-    return this.books.get(symbol);
+    if (symbol === this.lastSymbol && this.lastBook) return this.lastBook;
+    const b = this.books.get(symbol);
+    if (b) {
+      this.lastSymbol = symbol;
+      this.lastBook = b;
+    }
+    return b;
   }
 
   public submitOrder(cmd: EngineOrderCommand): EngineResult {
-    const book = this.books.get(cmd.symbol);
+    const book = (cmd.symbol === this.lastSymbol && this.lastBook)
+      ? this.lastBook
+      : this.books.get(cmd.symbol);
     if (!book) {
       return {
         success: false,
@@ -35,11 +49,15 @@ export class MatchingEngine {
         rejectedReason: 'INSTRUMENT_NOT_FOUND',
       };
     }
+    this.lastSymbol = cmd.symbol;
+    this.lastBook = book;
     return book.processOrder(cmd);
   }
 
   public cancelOrder(symbol: string, orderId: string, seq: number): EngineResult {
-    const book = this.books.get(symbol);
+    const book = (symbol === this.lastSymbol && this.lastBook)
+      ? this.lastBook
+      : this.books.get(symbol);
     if (!book) {
       return {
         success: false,
@@ -49,16 +67,18 @@ export class MatchingEngine {
         rejectedReason: 'INSTRUMENT_NOT_FOUND',
       };
     }
+    this.lastSymbol = symbol;
+    this.lastBook = book;
     return book.cancelOrder(orderId, seq);
   }
 
   public getOrder(symbol: string, orderId: string): OrderNode | undefined {
-    const book = this.books.get(symbol);
+    const book = this.getBook(symbol);
     return book?.getOrder(orderId);
   }
 
   public getL2Snapshot(symbol: string, depth?: number) {
-    const book = this.books.get(symbol);
+    const book = this.getBook(symbol);
     if (!book) return null;
     return book.getL2Snapshot(depth);
   }

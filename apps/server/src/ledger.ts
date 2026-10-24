@@ -51,22 +51,34 @@ export type HoldingDelta = {
 
 export class LedgerManager {
   private journalCounter: number = 1;
+  private accountCache: Map<string, string> = new Map();
 
   public getAccount(kind: AccountKind, userId?: string, symbol?: string): string {
-    if (kind === 'ISSUER') {
-      return symbol ? `acc_issuer_${symbol}` : 'acc_issuer_cash';
+    const key = `${kind}:${userId}:${symbol}`;
+    let acc = this.accountCache.get(key);
+    if (!acc) {
+      if (kind === 'ISSUER') {
+        acc = symbol ? `acc_issuer_${symbol}` : 'acc_issuer_cash';
+      } else {
+        const target = symbol ? symbol : 'cash';
+        const suffix = kind === 'USER_AVAILABLE' ? 'avail' : kind === 'USER_RESERVED' ? 'res' : 'esc';
+        acc = `acc_${userId}_${target}_${suffix}`;
+      }
+      this.accountCache.set(key, acc);
     }
-    const target = symbol ? symbol : 'cash';
-    const suffix = kind === 'USER_AVAILABLE' ? 'avail' : kind === 'USER_RESERVED' ? 'res' : 'esc';
-    return `acc_${userId}_${target}_${suffix}`;
+    return acc;
   }
 
   public assertJournalBalanced(journal: JournalDelta): void {
+    const p = journal.postings;
+    if (p.length === 2 && p[0]!.unit === p[1]!.unit) {
+      if (p[0]!.amount + p[1]!.amount === 0) return;
+    }
     const sumsByUnit = new Map<string, number>();
-    for (const p of journal.postings) {
-      assertInteger(p.amount, `posting.amount (${p.unit})`);
-      const current = sumsByUnit.get(p.unit) ?? 0;
-      sumsByUnit.set(p.unit, current + p.amount);
+    for (const item of p) {
+      assertInteger(item.amount, `posting.amount (${item.unit})`);
+      const current = sumsByUnit.get(item.unit) ?? 0;
+      sumsByUnit.set(item.unit, current + item.amount);
     }
 
     for (const [unit, total] of sumsByUnit.entries()) {
