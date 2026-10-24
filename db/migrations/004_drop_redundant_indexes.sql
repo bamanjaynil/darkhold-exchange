@@ -5,3 +5,6 @@ DROP INDEX IF EXISTS idx_postings_unit;
 DROP INDEX IF EXISTS idx_orders_user;
 DROP INDEX IF EXISTS idx_orders_status;
 DROP INDEX IF EXISTS idx_orders_seq;
+
+-- Partial index strictly for crash-recovery hydration of active resting orders
+CREATE INDEX IF NOT EXISTS idx_orders_active_seq ON orders (seq) WHERE status IN ('OPEN', 'PARTIALLY_FILLED');

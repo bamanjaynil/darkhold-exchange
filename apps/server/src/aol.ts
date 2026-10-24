@@ -31,18 +31,55 @@ export class AppendOnlyJournal {
   private bufferOffset: number = 0;
   private readonly bufferCapacity: number;
   private currentSeq: number = 0;
+  private isFlushScheduled: boolean = false;
 
-  constructor(filePath: string, bufferCapacity: number = 65_536) {
+  constructor(filePath: string, bufferCapacity: number = 4 * 1024 * 1024) {
     this.filePath = filePath;
     this.bufferCapacity = bufferCapacity;
-    this.writeBuffer = Buffer.allocUnsafe(bufferCapacity);
+    this.writeBuffer = Buffer.alloc(bufferCapacity, 0);
     this.fd = fs.openSync(filePath, 'a+');
+  }
+
+  private scheduleFlush(): void {
+    if (this.isFlushScheduled) return;
+    this.isFlushScheduled = true;
+    setImmediate(() => {
+      this.isFlushScheduled = false;
+      this.flushSync();
+    });
   }
 
   /**
    * Serializes an event into a fixed 128-byte binary frame and appends it to the log.
    */
   public append(record: AolRecord): void {
+    this.appendRecord(
+      record.seq,
+      record.timestamp,
+      record.cmdType,
+      record.price,
+      record.qty,
+      record.side,
+      record.orderId,
+      record.userId,
+      record.symbol
+    );
+  }
+
+  /**
+   * Zero-allocation primitive append directly to contiguous write buffer.
+   */
+  public appendRecord(
+    seq: number,
+    timestamp: number,
+    cmdType: number,
+    price: number,
+    qty: number,
+    side: number,
+    orderId: string,
+    userId: string,
+    symbol: string
+  ): void {
     if (this.bufferOffset + AOL_RECORD_SIZE > this.bufferCapacity) {
       this.flushSync();
     }
@@ -52,36 +89,30 @@ export class AppendOnlyJournal {
 
     // Header (16 bytes)
     buf.writeUInt32BE(AOL_MAGIC, offset);
-    buf.writeBigUInt64BE(BigInt(record.seq), offset + 4);
-    buf.writeUInt32BE(record.cmdType, offset + 12);
+    buf.writeBigUInt64BE(BigInt(seq), offset + 4);
+    buf.writeUInt32BE(cmdType, offset + 12);
     offset += 16;
 
     // Numerical Data (24 bytes)
-    buf.writeBigInt64BE(BigInt(record.timestamp), offset);
-    buf.writeBigInt64BE(BigInt(record.price), offset + 8);
-    buf.writeUInt32BE(record.qty, offset + 16);
-    buf.writeUInt8(record.side, offset + 20);
-    buf.fill(0, offset + 21, offset + 24); // 3 bytes alignment padding
+    buf.writeBigInt64BE(BigInt(timestamp), offset);
+    buf.writeBigInt64BE(BigInt(price), offset + 8);
+    buf.writeUInt32BE(qty, offset + 16);
+    buf.writeUInt8(side, offset + 20);
     offset += 24;
 
     // Fixed-length Strings (88 bytes)
-    // orderId (32 bytes)
-    buf.fill(0, offset, offset + 32);
-    buf.write(record.orderId.slice(0, 31), offset, 'utf-8');
+    buf.write(orderId, offset, 31, 'utf-8');
     offset += 32;
 
-    // userId (32 bytes)
-    buf.fill(0, offset, offset + 32);
-    buf.write(record.userId.slice(0, 31), offset, 'utf-8');
+    buf.write(userId, offset, 31, 'utf-8');
     offset += 32;
 
-    // symbol (24 bytes)
-    buf.fill(0, offset, offset + 24);
-    buf.write(record.symbol.slice(0, 23), offset, 'utf-8');
+    buf.write(symbol, offset, 23, 'utf-8');
     offset += 24;
 
     this.bufferOffset += AOL_RECORD_SIZE;
-    this.currentSeq = record.seq;
+    this.currentSeq = seq;
+    this.scheduleFlush();
   }
 
   /**
@@ -90,6 +121,7 @@ export class AppendOnlyJournal {
   public flushSync(): void {
     if (this.bufferOffset > 0) {
       fs.writeSync(this.fd, this.writeBuffer, 0, this.bufferOffset);
+      this.writeBuffer.fill(0, 0, this.bufferOffset);
       this.bufferOffset = 0;
     }
   }

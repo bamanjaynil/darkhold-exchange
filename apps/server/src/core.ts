@@ -110,9 +110,20 @@ export class ExchangeCore {
       }
     }
 
+    if (this.aol) {
+      this.persistence.setBeforeFlushHook(() => this.aol?.flushSync());
+    }
+
     for (const inst of instruments) {
       this.instruments.set(inst.symbol, inst);
     }
+  }
+
+  public close(): void {
+    if (this.aol) {
+      this.aol.close();
+    }
+    void this.persistence.close();
   }
 
   private isSyncAck(): boolean {
@@ -142,26 +153,29 @@ export class ExchangeCore {
     return h;
   }
 
+  private queueHead: number = 0;
+
   public dispatch<T>(cmd: any): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.totalCommandsDispatched++;
       this.commandQueue.push({ ...(cmd as any), resolve, reject });
-      if (this.commandQueue.length > this.maxCommandQueueDepth) {
-        this.maxCommandQueueDepth = this.commandQueue.length;
+      const currentDepth = this.commandQueue.length - this.queueHead;
+      if (currentDepth > this.maxCommandQueueDepth) {
+        this.maxCommandQueueDepth = currentDepth;
       }
-      void this.processQueue();
+      this.processQueue();
     });
   }
 
-  private async processQueue(): Promise<void> {
+  private processQueue(): void {
     if (this.isProcessing) return;
     this.isProcessing = true;
 
-    while (this.commandQueue.length > 0) {
-      const item = this.commandQueue.shift()!;
+    while (this.queueHead < this.commandQueue.length) {
+      const item = this.commandQueue[this.queueHead++]!;
       const t0 = performance.now();
       try {
-        await this.executeCommand(item);
+        this.executeCommand(item);
         this.commandExecutionTimesMs.push(performance.now() - t0);
       } catch (err) {
         this.totalCommandsRejected++;
@@ -169,6 +183,8 @@ export class ExchangeCore {
       }
     }
 
+    this.commandQueue.length = 0;
+    this.queueHead = 0;
     this.isProcessing = false;
   }
 
@@ -188,7 +204,7 @@ export class ExchangeCore {
     this.totalCommandsRejected = 0;
   }
 
-  private async executeCommand(item: Command): Promise<void> {
+  private executeCommand(item: Command): void {
     this.seq++;
     const currentSeq = this.seq;
 
@@ -448,29 +464,30 @@ export class ExchangeCore {
 
         // Fast Append-Only Log serialization
         if (this.aol) {
-          this.aol.append({
-            seq: currentSeq,
-            timestamp: this.clock.now(),
-            cmdType: 1, // ORDER_SUBMIT
-            price: cmd.price ?? 0,
-            qty: cmd.qty,
-            side: cmd.side === 'BUY' ? 0 : 1,
-            orderId: cmd.id,
-            userId: cmd.userId,
-            symbol: cmd.symbol,
-          });
+          const now = this.clock.now();
+          this.aol.appendRecord(
+            currentSeq,
+            now,
+            1, // ORDER_SUBMIT
+            cmd.price ?? 0,
+            cmd.qty,
+            cmd.side === 'BUY' ? 0 : 1,
+            cmd.id,
+            cmd.userId,
+            cmd.symbol
+          );
           for (const trade of result.trades) {
-            this.aol.append({
-              seq: currentSeq,
-              timestamp: this.clock.now(),
-              cmdType: 3, // TRADE
-              price: trade.price,
-              qty: trade.qty,
-              side: trade.takerSide === 'BUY' ? 0 : 1,
-              orderId: trade.id,
-              userId: trade.buyerUserId,
-              symbol: trade.symbol,
-            });
+            this.aol.appendRecord(
+              currentSeq,
+              now,
+              3, // TRADE
+              trade.price,
+              trade.qty,
+              trade.takerSide === 'BUY' ? 0 : 1,
+              trade.id,
+              trade.buyerUserId,
+              trade.symbol
+            );
           }
         }
 
@@ -561,17 +578,17 @@ export class ExchangeCore {
         }
 
         if (this.aol) {
-          this.aol.append({
-            seq: currentSeq,
-            timestamp: this.clock.now(),
-            cmdType: 2, // ORDER_CANCEL
-            price: ord.price,
-            qty: ord.remainingQty,
-            side: ord.side === 'BUY' ? 0 : 1,
+          this.aol.appendRecord(
+            currentSeq,
+            this.clock.now(),
+            2, // ORDER_CANCEL
+            ord.price,
+            ord.remainingQty,
+            ord.side === 'BUY' ? 0 : 1,
             orderId,
             userId,
-            symbol,
-          });
+            symbol
+          );
         }
 
         const deltaBatch: StateDeltaBatch = {

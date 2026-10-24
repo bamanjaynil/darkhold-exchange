@@ -59,6 +59,7 @@ export async function bootstrapCore(
     }));
 
     const persistence = new PersistenceEngine(pool, batchMax, batchMs);
+    await persistence.prewarm();
     core = new ExchangeCore(instruments, persistence, clock);
 
     // Wire rebuild callback for group-commit rollback path

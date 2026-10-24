@@ -33,6 +33,31 @@ export type StateDeltaBatch = {
   enqueuedAt?: number;
 };
 
+export const SQL_INSERT_JOURNALS = `INSERT INTO journals (id, kind, ref_type, ref_id)
+                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[])
+                 ON CONFLICT (id) DO NOTHING`;
+
+export const SQL_INSERT_POSTINGS = `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
+                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::varchar[], $4::bigint[], $5::bigint[])`;
+
+export const SQL_UPSERT_ORDERS = `INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
+                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::varchar[], $9::bigint[], $10::int[], $11::int[], $12::varchar[])
+                 ON CONFLICT (id) DO UPDATE SET
+                   remaining_qty = EXCLUDED.remaining_qty,
+                   status = EXCLUDED.status,
+                   updated_at = NOW()
+                 WHERE orders.status <> EXCLUDED.status OR orders.remaining_qty <> EXCLUDED.remaining_qty`;
+
+export const SQL_UPSERT_HOLDINGS = `INSERT INTO holdings (user_id, instrument_id, available, reserved, escrow)
+                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::bigint[], $5::bigint[])
+                 ON CONFLICT (user_id, instrument_id) DO UPDATE SET
+                   available = holdings.available + EXCLUDED.available,
+                   reserved = holdings.reserved + EXCLUDED.reserved,
+                   escrow = holdings.escrow + EXCLUDED.escrow,
+                   updated_at = NOW()`;
+
+const activePrewarmedClients = new Set<pg.PoolClient>();
+
 export type TimingDistribution = {
   count: number;
   sumMs: number;
@@ -133,6 +158,9 @@ export class PersistenceEngine {
   private rebuildCallback?: () => Promise<void>;
   public injectFailure: boolean = false; // For testing rollback and rebuild
   private instrumentIdMap = new Map<string, string>();
+  private flushClient: pg.PoolClient | null = null;
+  private isPrewarmed: boolean = false;
+  private beforeFlushHook?: () => void;
 
   // --- Telemetry State ---
   private queueWaitMs: number[] = [];
@@ -186,6 +214,78 @@ export class PersistenceEngine {
     this.batchMs = batchMs;
   }
 
+  public setBeforeFlushHook(hook: () => void): void {
+    this.beforeFlushHook = hook;
+  }
+
+  public async prewarm(): Promise<void> {
+    if (this.isPrewarmed && this.flushClient) return;
+
+    if (!this.flushClient) {
+      this.flushClient = await this.pool.connect();
+      activePrewarmedClients.add(this.flushClient);
+    }
+
+    if (!(this.pool as any).__hasPrewarmEndHook) {
+      (this.pool as any).__hasPrewarmEndHook = true;
+      const origEnd = this.pool.end.bind(this.pool);
+      this.pool.end = async () => {
+        for (const c of activePrewarmedClients) {
+          try { c.release(); } catch {}
+        }
+        activePrewarmedClients.clear();
+        return origEnd();
+      };
+    }
+
+    // Pre-cache instrument IDs in RAM
+    if (this.instrumentIdMap.size === 0) {
+      const { rows } = await this.flushClient.query<{ id: string; symbol: string }>(
+        'SELECT id, symbol FROM instruments'
+      );
+      for (const r of rows) {
+        this.instrumentIdMap.set(r.symbol, r.id);
+      }
+    }
+
+    // Pre-compile and pre-parse the write queries on flushClient
+    try {
+      await this.flushClient.query('BEGIN');
+      await this.flushClient.query({
+        name: 'upsert_orders_unnest_direct',
+        text: SQL_UPSERT_ORDERS,
+        values: [[], [], [], [], [], [], [], [], [], [], [], []],
+      });
+      await this.flushClient.query({
+        name: 'insert_journals_unnest',
+        text: SQL_INSERT_JOURNALS,
+        values: [[], [], [], []],
+      });
+      await this.flushClient.query({
+        name: 'insert_postings_unnest',
+        text: SQL_INSERT_POSTINGS,
+        values: [[], [], [], [], []],
+      });
+      await this.flushClient.query('COMMIT');
+    } catch {
+      try { await this.flushClient.query('ROLLBACK'); } catch {}
+    }
+
+    this.isPrewarmed = true;
+  }
+
+  public async close(): Promise<void> {
+    if (this.flushClient) {
+      const c = this.flushClient;
+      this.flushClient = null;
+      this.isPrewarmed = false;
+      activePrewarmedClients.delete(c);
+      try {
+        c.release();
+      } catch {}
+    }
+  }
+
   public setRebuildCallback(cb: () => Promise<void>): void {
     this.rebuildCallback = cb;
   }
@@ -224,6 +324,10 @@ export class PersistenceEngine {
     if (this.isFlushing || this.queue.length === 0) return;
     this.isFlushing = true;
 
+    if (this.beforeFlushHook) {
+      try { this.beforeFlushHook(); } catch {}
+    }
+
     const flushStart = performance.now();
     const toProcess = this.queue.splice(0, this.batchMax);
 
@@ -234,7 +338,11 @@ export class PersistenceEngine {
     }
 
     const tAcquire = performance.now();
-    const client = await this.pool.connect();
+    let client = this.flushClient;
+    if (!client) {
+      client = await this.pool.connect();
+      this.flushClient = client;
+    }
     this.acquireConnMs.push(performance.now() - tAcquire);
 
     try {
@@ -243,10 +351,11 @@ export class PersistenceEngine {
       }
 
       const tBegin = performance.now();
-      await client.query('BEGIN');
       const fastAsyncWal = process.env.FAST_ASYNC_WAL !== 'false';
       if (fastAsyncWal) {
-        await client.query('SET LOCAL synchronous_commit = off');
+        await client.query('BEGIN; SET LOCAL synchronous_commit = off;');
+      } else {
+        await client.query('BEGIN;');
       }
       this.beginMs.push(performance.now() - tBegin);
       this.queryCountBegin++;
@@ -417,9 +526,7 @@ export class PersistenceEngine {
 
         await client.query({
           name: 'insert_journals_unnest',
-          text: `INSERT INTO journals (id, kind, ref_type, ref_id)
-                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[])
-                 ON CONFLICT (id) DO NOTHING`,
+          text: SQL_INSERT_JOURNALS,
           values: [ids, kinds, refTypes, refIds],
         });
         this.queryCountJournals++;
@@ -469,8 +576,7 @@ export class PersistenceEngine {
 
           await client.query({
             name: 'insert_postings_unnest',
-            text: `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
-                   SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::varchar[], $4::bigint[], $5::bigint[])`,
+            text: SQL_INSERT_POSTINGS,
             values: [journalIds, accountIds, units, amounts, seqs],
           });
           this.queryCountPostings++;
@@ -561,13 +667,7 @@ export class PersistenceEngine {
 
         await client.query({
           name: 'upsert_orders_unnest_direct',
-          text: `INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
-                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::varchar[], $9::bigint[], $10::int[], $11::int[], $12::varchar[])
-                 ON CONFLICT (id) DO UPDATE SET
-                   remaining_qty = EXCLUDED.remaining_qty,
-                   status = EXCLUDED.status,
-                   updated_at = NOW()
-                 WHERE orders.status <> EXCLUDED.status OR orders.remaining_qty <> EXCLUDED.remaining_qty`,
+          text: SQL_UPSERT_ORDERS,
           values: [
             ids,
             clientOrderIds,
@@ -748,8 +848,13 @@ export class PersistenceEngine {
       this.flushesCount++;
       this.totalFlushMs.push(performance.now() - flushStart);
     } catch (err: any) {
-      const tRollback = performance.now();
-      await client.query('ROLLBACK');
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        try { client.release(true); } catch {}
+        this.flushClient = null;
+        this.isPrewarmed = false;
+      }
       this.queryCountRollback++;
       this.failedTransactionsCount++;
       this.rollbacksCount++;
@@ -768,7 +873,10 @@ export class PersistenceEngine {
         }
       }
     } finally {
-      client.release();
+      if (!this.isPrewarmed && this.flushClient) {
+        try { this.flushClient.release(); } catch {}
+        this.flushClient = null;
+      }
       this.isFlushing = false;
     }
   }
