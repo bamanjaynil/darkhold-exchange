@@ -105,9 +105,6 @@ CREATE TABLE IF NOT EXISTS orders (
   UNIQUE(user_id, client_order_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
-CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
-CREATE INDEX IF NOT EXISTS idx_orders_seq ON orders(seq);
 
 CREATE TABLE IF NOT EXISTS trades (
   id VARCHAR(64) PRIMARY KEY,

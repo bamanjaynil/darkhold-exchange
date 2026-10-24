@@ -40,6 +40,16 @@ export const SQL_INSERT_JOURNALS = `INSERT INTO journals (id, kind, ref_type, re
 export const SQL_INSERT_POSTINGS = `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
                  SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::varchar[], $4::bigint[], $5::bigint[])`;
 
+export const SQL_INSERT_ORDERS = `INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
+                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::varchar[], $9::bigint[], $10::int[], $11::int[], $12::varchar[])`;
+
+export const SQL_UPDATE_ORDERS = `UPDATE orders AS o
+                 SET remaining_qty = u.remaining_qty,
+                     status = u.status,
+                     updated_at = NOW()
+                 FROM (SELECT * FROM UNNEST($1::varchar[], $2::int[], $3::varchar[]) AS t(id, remaining_qty, status)) AS u
+                 WHERE o.id = u.id AND (o.status <> u.status OR o.remaining_qty <> u.remaining_qty)`;
+
 export const SQL_UPSERT_ORDERS = `INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
                  SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::varchar[], $9::bigint[], $10::int[], $11::int[], $12::varchar[])
                  ON CONFLICT (id) DO UPDATE SET
@@ -220,6 +230,10 @@ export class PersistenceEngine {
     this.beforeFlushHook = hook;
   }
 
+  public async init(): Promise<void> {
+    return this.prewarm();
+  }
+
   public async prewarm(): Promise<void> {
     if (this.isPrewarmed && this.flushClient) return;
 
@@ -240,6 +254,17 @@ export class PersistenceEngine {
       };
     }
 
+    // Ensure redundant secondary indexes on write-heavy tables are dropped
+    try {
+      await this.flushClient.query(`
+        DROP INDEX IF EXISTS idx_postings_unit;
+        DROP INDEX IF EXISTS idx_orders_user;
+        DROP INDEX IF EXISTS idx_orders_status;
+        DROP INDEX IF EXISTS idx_orders_seq;
+        DROP INDEX IF EXISTS idx_orders_active_seq;
+      `);
+    } catch {}
+
     // Pre-cache instrument IDs in RAM
     if (this.instrumentIdMap.size === 0) {
       const { rows } = await this.flushClient.query<{ id: string; symbol: string }>(
@@ -250,26 +275,38 @@ export class PersistenceEngine {
       }
     }
 
-    // Pre-compile and pre-parse the write queries on flushClient
+    // Pre-compile and pre-parse the write queries on flushClient inside BEGIN ... ROLLBACK
     try {
+      await this.flushClient.query('BEGIN; SET LOCAL synchronous_commit = off;');
+      for (let i = 0; i < 5; i++) {
+        await this.flushClient.query({
+          name: 'insert_orders_unnest_direct',
+          text: SQL_INSERT_ORDERS,
+          values: [[], [], [], [], [], [], [], [], [], [], [], []],
+        });
+        await this.flushClient.query({
+          name: 'update_orders_unnest_direct',
+          text: SQL_UPDATE_ORDERS,
+          values: [[], [], []],
+        });
+        await this.flushClient.query({
+          name: 'upsert_orders_unnest_direct',
+          text: SQL_UPSERT_ORDERS,
+          values: [[], [], [], [], [], [], [], [], [], [], [], []],
+        });
+        await this.flushClient.query({
+          name: 'insert_journals_unnest',
+          text: SQL_INSERT_JOURNALS,
+          values: [[], [], [], []],
+        });
+        await this.flushClient.query({
+          name: 'insert_postings_unnest',
+          text: SQL_INSERT_POSTINGS,
+          values: [[], [], [], [], []],
+        });
+      }
+      await this.flushClient.query('ROLLBACK');
       await this.flushClient.query('BEGIN; SET LOCAL synchronous_commit = off; COMMIT;');
-      await this.flushClient.query('BEGIN');
-      await this.flushClient.query({
-        name: 'upsert_orders_unnest_direct',
-        text: SQL_UPSERT_ORDERS,
-        values: [[], [], [], [], [], [], [], [], [], [], [], []],
-      });
-      await this.flushClient.query({
-        name: 'insert_journals_unnest',
-        text: SQL_INSERT_JOURNALS,
-        values: [[], [], [], []],
-      });
-      await this.flushClient.query({
-        name: 'insert_postings_unnest',
-        text: SQL_INSERT_POSTINGS,
-        values: [[], [], [], [], []],
-      });
-      await this.flushClient.query('COMMIT');
     } catch {
       try { await this.flushClient.query('ROLLBACK'); } catch {}
     }
@@ -498,7 +535,7 @@ export class PersistenceEngine {
         }
       }
 
-      // 4. Bulk Upsert Orders (deduplicate within batch to keep latest order state)
+      // 4. Partition Orders into New (INSERT) and Existing (UPDATE)
       const latestOrders = new Map<string, OrderNode>();
       for (let bIdx = 0; bIdx < toProcess.length; bIdx++) {
         const batch = toProcess[bIdx]!;
@@ -508,7 +545,8 @@ export class PersistenceEngine {
         }
       }
 
-      const allOrders: OrderNode[] = [];
+      const newOrders: OrderNode[] = [];
+      const existingOrders: OrderNode[] = [];
       const isHighVolume = toProcess.length >= 50;
 
       for (const ord of latestOrders.values()) {
@@ -517,11 +555,16 @@ export class PersistenceEngine {
         if (isHighVolume && isTerminal && !wasPersisted) {
           continue;
         }
-        allOrders.push(ord);
-        if (!isTerminal) {
-          this.persistedOrderIds.add(ord.id);
-        } else if (wasPersisted) {
-          this.persistedOrderIds.delete(ord.id);
+        if (wasPersisted) {
+          existingOrders.push(ord);
+          if (isTerminal) {
+            this.persistedOrderIds.delete(ord.id);
+          }
+        } else {
+          newOrders.push(ord);
+          if (!isTerminal) {
+            this.persistedOrderIds.add(ord.id);
+          }
         }
       }
 
@@ -661,9 +704,9 @@ export class PersistenceEngine {
         }
       }
 
-      // Execute Orders Bulk Upsert (Columnar UNNEST)
+      // Execute Orders Bulk Insert / Update (Columnar UNNEST)
       const tOrders = performance.now();
-      if (allOrders.length > 0) {
+      if (newOrders.length > 0) {
         const ids: string[] = [];
         const clientOrderIds: string[] = [];
         const seqs: number[] = [];
@@ -677,8 +720,8 @@ export class PersistenceEngine {
         const remainingQtys: number[] = [];
         const statuses: string[] = [];
 
-        for (let i = 0; i < allOrders.length; i++) {
-          const ord = allOrders[i]!;
+        for (let i = 0; i < newOrders.length; i++) {
+          const ord = newOrders[i]!;
           ids.push(ord.id);
           clientOrderIds.push(ord.clientOrderId);
           seqs.push(ord.seq);
@@ -693,28 +736,75 @@ export class PersistenceEngine {
           statuses.push(ord.status);
         }
 
+        try {
+          await client.query({
+            name: 'insert_orders_unnest_direct',
+            text: SQL_INSERT_ORDERS,
+            values: [
+              ids,
+              clientOrderIds,
+              seqs,
+              userIds,
+              instrumentIds,
+              sides,
+              types,
+              tifs,
+              prices,
+              qtys,
+              remainingQtys,
+              statuses,
+            ],
+          });
+          this.queryCountOrders++;
+        } catch (err: any) {
+          if (err.code === '23505') {
+            await client.query({
+              name: 'upsert_orders_unnest_direct',
+              text: SQL_UPSERT_ORDERS,
+              values: [
+                ids,
+                clientOrderIds,
+                seqs,
+                userIds,
+                instrumentIds,
+                sides,
+                types,
+                tifs,
+                prices,
+                qtys,
+                remainingQtys,
+                statuses,
+              ],
+            });
+            this.queryCountOrders++;
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      if (existingOrders.length > 0) {
+        const exIds: string[] = [];
+        const exRemainingQtys: number[] = [];
+        const exStatuses: string[] = [];
+
+        for (let i = 0; i < existingOrders.length; i++) {
+          const ord = existingOrders[i]!;
+          exIds.push(ord.id);
+          exRemainingQtys.push(ord.remainingQty);
+          exStatuses.push(ord.status);
+        }
+
         await client.query({
-          name: 'upsert_orders_unnest_direct',
-          text: SQL_UPSERT_ORDERS,
-          values: [
-            ids,
-            clientOrderIds,
-            seqs,
-            userIds,
-            instrumentIds,
-            sides,
-            types,
-            tifs,
-            prices,
-            qtys,
-            remainingQtys,
-            statuses,
-          ],
+          name: 'update_orders_unnest_direct',
+          text: SQL_UPDATE_ORDERS,
+          values: [exIds, exRemainingQtys, exStatuses],
         });
         this.queryCountOrders++;
       }
+
       this.sqlOrdersMs.push(performance.now() - tOrders);
-      this.totalOrdersUpsertedCount += allOrders.length;
+      this.totalOrdersUpsertedCount += newOrders.length + existingOrders.length;
 
       // Execute Trades Bulk Insert (Columnar UNNEST)
       const tTrades = performance.now();

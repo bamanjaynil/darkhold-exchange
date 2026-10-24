@@ -25,6 +25,7 @@ export async function runCoreBenchmark(iterations = 5_000, batchMax = 500, batch
   console.log(`[BENCH:CORE] Bootstrapping ExchangeCore (PERSIST_BATCH_MAX=${effectiveBatchMax}, PERSIST_BATCH_MS=${batchMs})...`);
   const core = await bootstrapCore(pool, clock, effectiveBatchMax, batchMs, true);
 
+  await core.persistence.prewarm();
   console.log(`[BENCH:CORE] Submitting ${iterations.toLocaleString()} orders through ExchangeCore + group commit...`);
 
   if (global.gc) global.gc();
