@@ -24,10 +24,9 @@ const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:3000';
 export function setup() {
   const usersToLogin = [
     { username: 'admin', password: 'admin_darkhold_2026' },
-    { username: 'alice', password: 'demo_darkhold_2026' },
-    { username: 'bob', password: 'demo_darkhold_2026' },
-    { username: 'carol', password: 'demo_darkhold_2026' },
+    { username: 'bench_maker', password: 'demo_darkhold_2026' },
     { username: 'bench_bot', password: 'demo_darkhold_2026' },
+    { username: 'bench_taker', password: 'demo_darkhold_2026' },
   ];
 
   const authData = {};
@@ -63,19 +62,18 @@ export default function (data) {
   const isEvenVU = __VU % 2 === 0;
   const isEvenIter = __ITER % 2 === 0;
 
-  // Disjoint counterparty sets:
-  // Even VUs (25 VUs): Group A = [admin, bob]
-  // Odd VUs (25 VUs):  Group B = [bench_bot, carol]
-  // Complete separation guarantees 0% Self-Trade Prevention (STP) collisions
-  // and continuous, immediate crossing fills with abundant liquidity runway.
+  // Disjoint dedicated benchmark counterparty sets:
+  // Even VUs (25 VUs): Group A = [admin, bench_maker]
+  // Odd VUs (25 VUs):  Group B = [bench_bot, bench_taker]
+  // Complete separation guarantees 0% STP collisions and keeps alice, bob, carol 100% untouched
   let user;
   let side;
 
   if (isEvenVU) {
-    user = (__VU % 4 === 0) ? data.users.admin : data.users.bob;
+    user = (__VU % 4 === 0) ? data.users.admin : data.users.bench_maker;
     side = isEvenIter ? 'BUY' : 'SELL';
   } else {
-    user = ((__VU + 1) % 4 === 0) ? data.users.bench_bot : data.users.carol;
+    user = ((__VU + 1) % 4 === 0) ? data.users.bench_bot : data.users.bench_taker;
     side = isEvenIter ? 'SELL' : 'BUY';
   }
 

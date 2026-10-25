@@ -243,12 +243,54 @@ export class ExchangeCore {
     return this.volume24h.get(symbol) ?? 0;
   }
 
-  public getTotalOpenOrderCount(): number {
-    return this.engine.getTotalOpenOrderCount();
+  public getTotalOpenOrderCount(symbol?: string): number {
+    if (symbol) {
+      return this.engine.getBook(symbol)?.getOpenOrderCount() ?? 0;
+    }
+    let count = 0;
+    for (const inst of this.instruments.values()) {
+      if (inst.isBenchmark) continue;
+      count += this.engine.getBook(inst.symbol)?.getOpenOrderCount() ?? 0;
+    }
+    return count;
   }
 
   public getOpenOrdersForUser(userId: string) {
     return this.engine.getOpenOrdersForUser(userId);
+  }
+
+  public getActiveOrders(symbol?: string, userId?: string): Array<{
+    id: string;
+    client_order_id: string;
+    seq: number;
+    user_id: string;
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    type: string;
+    tif: string;
+    price: number;
+    qty: number;
+    remaining_qty: number;
+    status: string;
+    created_at: string;
+  }> {
+    const list = this.engine.getAllOpenOrders(symbol);
+    const filtered = userId ? list.filter((o) => o.userId === userId) : list;
+    return filtered.map((o) => ({
+      id: o.id,
+      client_order_id: o.clientOrderId,
+      seq: o.seq,
+      user_id: o.userId,
+      symbol: o.symbol,
+      side: o.side,
+      type: o.type,
+      tif: o.tif,
+      price: o.price,
+      qty: o.qty,
+      remaining_qty: o.remainingQty,
+      status: o.status || 'OPEN',
+      created_at: new Date().toISOString(),
+    }));
   }
 
   public getBalance(userId: string): UserBalance {

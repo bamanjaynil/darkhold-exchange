@@ -262,13 +262,8 @@ export function registerRoutes(
 
   server.get('/api/book/:symbol', async (req, reply) => {
     const { symbol } = req.params as { symbol: string };
-    const cached = core.cachedL2Snapshots.get(symbol);
-    if (cached && cached.seq === core.seq) {
-      return reply.send(cached.data);
-    }
     const snap = core.engine.getL2Snapshot(symbol, 20);
     if (!snap) return reply.status(404).send({ error: 'INSTRUMENT_NOT_FOUND' });
-    core.cachedL2Snapshots.set(symbol, { seq: core.seq, data: snap });
     reply.send(snap);
   });
 
@@ -409,73 +404,19 @@ export function registerRoutes(
   server.delete('/api/orders/:id', { preHandler: requireAuth }, handleCancelOrder);
   server.post('/api/orders/:id/cancel', { preHandler: requireAuth }, handleCancelOrder);
 
-  const getMyOrdersHandler = async (req: FastifyRequest, reply: FastifyReply) => {
-    await core.persistence.flush();
-    const userId = req.sessionUser!.id;
-    const { rows } = await core.persistence['pool'].query(
-      `SELECT o.id, o.client_order_id, o.side, o.type, o.tif, o.price, o.qty, o.remaining_qty, o.status, o.created_at, i.symbol
-       FROM orders o
-       JOIN instruments i ON o.instrument_id = i.id
-       WHERE o.user_id = $1
-       ORDER BY o.seq DESC
-       LIMIT 100`,
-      [userId]
-    );
+  const getOrdersHandler = async (req: FastifyRequest, reply: FastifyReply) => {
+    const query = (req.query || {}) as { symbol?: string; my?: string };
+    const symbol = query.symbol;
+    const isMyOnly = query.my === 'true' || req.url.startsWith('/api/orders/my');
+    const userId = isMyOnly ? req.sessionUser?.id : undefined;
 
-    const openInRam = core.getOpenOrdersForUser(userId);
-    const ramOpenMap = new Map<string, any>();
-    for (let i = 0; i < openInRam.length; i++) {
-      const ord = openInRam[i]!;
-      ramOpenMap.set(ord.id, ord);
-    }
-
-    const seenIds = new Set<string>();
-    const mapped = rows.map((r: any) => {
-      seenIds.add(r.id);
-      let status = r.status;
-      let remainingQty = Number(r.remaining_qty);
-      const live = ramOpenMap.get(r.id);
-
-      if (status === 'OPEN') {
-        if (!live) {
-          status = 'CANCELLED';
-        } else {
-          remainingQty = live.remainingQty;
-        }
-      }
-
-      return {
-        ...r,
-        price: Number(r.price),
-        qty: Number(r.qty),
-        remaining_qty: remainingQty,
-        status,
-      };
-    });
-
-    for (const [id, ord] of ramOpenMap.entries()) {
-      if (!seenIds.has(id)) {
-        mapped.unshift({
-          id: ord.id,
-          client_order_id: ord.clientOrderId,
-          side: ord.side,
-          type: ord.type,
-          tif: ord.tif,
-          price: ord.price,
-          qty: ord.qty,
-          remaining_qty: ord.remainingQty,
-          status: 'OPEN',
-          created_at: new Date().toISOString(),
-          symbol: ord.symbol,
-        });
-      }
-    }
-
-    reply.send(mapped);
+    // Authoritative in-memory extraction: 0 DB latency, 0 ghost orders, 100% synchronized with matching engine
+    const orders = core.getActiveOrders(symbol, userId);
+    reply.send(orders);
   };
 
-  server.get('/api/orders/my', { preHandler: requireAuth }, getMyOrdersHandler);
-  server.get('/api/orders', { preHandler: requireAuth }, getMyOrdersHandler);
+  server.get('/api/orders/my', { preHandler: requireAuth }, getOrdersHandler);
+  server.get('/api/orders', { preHandler: requireAuth }, getOrdersHandler);
 
   server.get('/api/balances', { preHandler: requireAuth }, async (req, reply) => {
     const bal = core.getBalance(req.sessionUser!.id);

@@ -27,10 +27,42 @@ type Instrument = {
   minQty: number;
   maxQtyPerOrder: number;
   escrowRequired: boolean;
+  isBenchmark?: boolean;
 };
 
 type TradeItem = { id: string; price: number; qty: number; created_at: string; is_simulated: boolean; side?: string };
-type OpenOrder = { id: string; client_order_id: string; side: 'BUY' | 'SELL'; type: string; price: number; qty: number; remaining_qty: number; symbol: string; status?: string };
+type OpenOrder = {
+  id: string;
+  client_order_id: string;
+  user_id?: string;
+  side: 'BUY' | 'SELL';
+  type: string;
+  tif?: string;
+  price: number;
+  qty: number;
+  remaining_qty: number;
+  symbol: string;
+  status?: string;
+};
+
+function getTraderLabel(userId?: string): string {
+  if (!userId) return 'MARKET';
+  if (userId.includes('alice')) return 'ALICE';
+  if (userId.includes('bob')) return 'BOB';
+  if (userId.includes('carol')) return 'CAROL';
+  if (userId.includes('admin')) return 'ADMIN';
+  if (userId.includes('bench')) return 'BOT';
+  return userId.replace('usr_', '').toUpperCase();
+}
+
+function getTraderColor(userId?: string): string {
+  if (!userId) return '#94A3B8';
+  if (userId.includes('alice')) return '#00F0FF';
+  if (userId.includes('bob')) return '#10B981';
+  if (userId.includes('carol')) return '#A855F7';
+  if (userId.includes('admin')) return '#F59E0B';
+  return '#94A3B8';
+}
 
 export default function App() {
   const [user, setUser] = useState<{ id: string; username: string; role: string } | null>(null);
@@ -41,7 +73,9 @@ export default function App() {
   const [asks, setAsks] = useState<BookLevel[]>([]);
   const [spread, setSpread] = useState<number | null>(null);
   const [trades, setTrades] = useState<TradeItem[]>([]);
+  const [marketOrders, setMarketOrders] = useState<OpenOrder[]>([]);
   const [myOrders, setMyOrders] = useState<OpenOrder[]>([]);
+  const [orderViewMode, setOrderViewMode] = useState<'market' | 'my'>('market');
   const [holdings, setHoldings] = useState<Array<{ symbol: string; available: number; reserved: number; escrow: number }>>([]);
   const [activeTab, setActiveTab] = useState<'cockpit' | 'auctions' | 'escrows' | 'solvency' | 'diagnostics'>('cockpit');
   const [wsConnected, setWsConnected] = useState<boolean>(false);
@@ -112,7 +146,6 @@ export default function App() {
   useEffect(() => {
     fetchSession();
     fetchInstruments();
-    fetchMarketStats();
   }, []);
 
   const fetchSession = async () => {
@@ -129,15 +162,12 @@ export default function App() {
           setCsrfToken(data.csrfToken);
         }
         void fetchHoldings();
-        void fetchMyOrders();
       } else if (res.status === 401) {
         setUser(null);
         setHoldings([]);
         setMyOrders([]);
       }
-    } catch {
-      // Don't wipe user state on transient connection error
-    }
+    } catch {}
   };
 
   const fetchHoldings = async () => {
@@ -145,20 +175,7 @@ export default function App() {
       const res = await fetch('/api/wallet/holdings', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
-        setHoldings(data);
-      }
-    } catch {
-      // Silent error handling
-    }
-  };
-
-  const fetchMyOrders = async () => {
-    try {
-      const res = await fetch('/api/orders/my', { credentials: 'include' });
-      if (res.ok) {
-        const data = await res.json();
-        // Only keep active OPEN orders in the active orders view
-        setMyOrders((data || []).filter((o: any) => o.status === 'OPEN'));
+        setHoldings((data || []).filter((h: any) => h.symbol !== 'BENCH-X'));
       }
     } catch {}
   };
@@ -168,24 +185,80 @@ export default function App() {
       const res = await fetch('/api/instruments');
       if (res.ok) {
         const list = await res.json();
-        setInstruments(list);
-        if (list.length > 0 && !selectedSymbol) setSelectedSymbol(list[0].symbol);
+        const nonBench = list.filter((i: any) => !i.isBenchmark && i.symbol !== 'BENCH-X');
+        setInstruments(nonBench);
+        if (nonBench.length > 0 && (!selectedSymbol || selectedSymbol === 'BENCH-X')) {
+          setSelectedSymbol(nonBench[0].symbol);
+        }
       }
     } catch (e) {
       console.error(e);
     }
   };
 
-  const fetchMarketStats = async () => {
+  // --- Background Polling Sync (Runs every 1000ms & on events) ---
+  const syncMarketState = async () => {
+    if (!selectedSymbol || selectedSymbol === 'BENCH-X') return;
     try {
-      const res = await fetch('/api/market/stats');
-      if (res.ok) {
-        const stats = await res.json();
-        if (stats.seq !== undefined) setEngineSeq(stats.seq);
-        if (stats.activeOrders !== undefined) setActiveOrderCount(stats.activeOrders);
+      const [bookRes, mktOrdersRes, tradesRes, statsRes] = await Promise.all([
+        fetch(`/api/book/${selectedSymbol}`).catch(() => null),
+        fetch(`/api/orders?symbol=${selectedSymbol}`).catch(() => null),
+        fetch(`/api/trades/${selectedSymbol}`).catch(() => null),
+        fetch('/api/market/stats').catch(() => null),
+      ]);
+
+      if (bookRes && bookRes.ok) {
+        const d = await bookRes.json();
+        setBids(d.bids || []);
+        setAsks(d.asks || []);
+        setSpread(d.spread);
+      }
+
+      if (mktOrdersRes && mktOrdersRes.ok) {
+        const ords = await mktOrdersRes.json();
+        const nonBench = (ords || []).filter((o: any) => o.symbol !== 'BENCH-X');
+        setMarketOrders(nonBench);
+        if (user) {
+          setMyOrders(nonBench.filter((o: any) => o.user_id === user.id));
+        } else {
+          setMyOrders([]);
+        }
+      }
+
+      if (tradesRes && tradesRes.ok) {
+        const trs = await tradesRes.json();
+        setTrades(trs || []);
+      }
+
+      if (statsRes && statsRes.ok) {
+        const st = await statsRes.json();
+        if (st.seq !== undefined) setEngineSeq(st.seq);
+        if (st.activeOrders !== undefined) setActiveOrderCount(st.activeOrders);
+      }
+
+      if (user) {
+        const [meRes, holdRes] = await Promise.all([
+          fetch('/api/auth/me', { credentials: 'include' }).catch(() => null),
+          fetch('/api/wallet/holdings', { credentials: 'include' }).catch(() => null),
+        ]);
+        if (meRes && meRes.ok) {
+          const meData = await meRes.json();
+          if (meData.balance) setBalance(meData.balance);
+        }
+        if (holdRes && holdRes.ok) {
+          const hData = await holdRes.json();
+          setHoldings((hData || []).filter((h: any) => h.symbol !== 'BENCH-X'));
+        }
       }
     } catch {}
   };
+
+  // 1000ms Heartbeat & Synchronizer
+  useEffect(() => {
+    syncMarketState();
+    const interval = setInterval(syncMarketState, 1000);
+    return () => clearInterval(interval);
+  }, [selectedSymbol, user?.id]);
 
   // 2. WebSocket Connection with auto-reconnect
   useEffect(() => {
@@ -237,11 +310,6 @@ export default function App() {
                 setBids(msg.data.bids || []);
                 setAsks(msg.data.asks || []);
                 setSpread(msg.data.spread);
-                // Compute total active order count
-                let count = 0;
-                for (const b of (msg.data.bids || [])) count += b.orders || 0;
-                for (const a of (msg.data.asks || [])) count += a.orders || 0;
-                setActiveOrderCount(count);
               }
             } else if (msg.channel === `trades:${selectedSymbol}`) {
               if (msg.data) {
@@ -250,6 +318,8 @@ export default function App() {
             } else if (msg.channel === 'me') {
               if (msg.data.balance) setBalance(msg.data.balance);
             }
+            // Trigger fresh state sync on WS events
+            void syncMarketState();
           }
         } catch (err) {
           console.error(err);
@@ -276,25 +346,7 @@ export default function App() {
     };
   }, [selectedSymbol, user?.id]);
 
-  // Refresh book and trades on symbol change
-  useEffect(() => {
-    if (!selectedSymbol) return;
-    fetch(`/api/book/${selectedSymbol}`).then((r) => {
-      if (r.ok) r.json().then((d) => {
-        setBids(d.bids || []);
-        setAsks(d.asks || []);
-        setSpread(d.spread);
-      });
-    });
-    fetch(`/api/trades/${selectedSymbol}`).then((r) => {
-      if (r.ok) r.json().then(setTrades);
-    });
-    if (user) {
-      void fetchMyOrders();
-    }
-  }, [selectedSymbol, user?.id]);
-
-  // --- INNOVATION 2: Tactical Book Sniping ---
+  // --- Tactical Book Sniping ---
   const handleSelectPrice = (targetPriceMinor: number, suggestedSide: 'BUY' | 'SELL') => {
     setPriceInput((targetPriceMinor / 100).toString());
     setSide(suggestedSide);
@@ -305,7 +357,19 @@ export default function App() {
     });
   };
 
-  // --- INNOVATION 4: Auto-Pilot Market Simulator ---
+  const handleSnipeOrder = (order: OpenOrder) => {
+    setPriceInput((order.price / 100).toString());
+    setQtyInput(order.remaining_qty.toString());
+    const counterSide = order.side === 'BUY' ? 'SELL' : 'BUY';
+    setSide(counterSide);
+    setOrderType('LIMIT');
+    setOrderMessage({
+      text: `Tactical Snipe loaded: match ${order.remaining_qty} units @ ${formatDKC(order.price)} (${counterSide})`,
+      error: false,
+    });
+  };
+
+  // --- Auto-Pilot Market Simulator ---
   useEffect(() => {
     if (!autoPilot) {
       if (autoPilotTimerRef.current) {
@@ -319,8 +383,8 @@ export default function App() {
     autoPilotTimerRef.current = setInterval(async () => {
       tick++;
       try {
-        const bestBid = bids.length > 0 ? bids[0]!.price : selectedInstrument?.faceValue || 100000;
-        const bestAsk = asks.length > 0 ? asks[0]!.price : (selectedInstrument?.faceValue || 100000) + 200;
+        const bestBid = bids.length > 0 ? bids[0]!.price : selectedInstrument?.faceValue || 150000;
+        const bestAsk = asks.length > 0 ? asks[0]!.price : (selectedInstrument?.faceValue || 150000) + 200;
         const mid = Math.floor((bestBid + bestAsk) / 2);
 
         // Every 3rd tick submit a crossing order to match
@@ -352,6 +416,8 @@ export default function App() {
             qty: 1,
           }),
         });
+
+        void syncMarketState();
       } catch {}
     }, 400);
 
@@ -363,7 +429,7 @@ export default function App() {
     };
   }, [autoPilot, bids, asks, selectedSymbol, selectedInstrument, csrfToken]);
 
-  // --- INNOVATION 5: 1-Click Persona Switcher ---
+  // --- 1-Click Persona Switcher ---
   const handleSwitchPersona = async (username: string) => {
     const password = username === 'admin' ? 'admin_darkhold_2026' : 'demo_darkhold_2026';
     try {
@@ -378,8 +444,7 @@ export default function App() {
         setUser(data.user);
         if (data.balance) setBalance(data.balance);
         if (data.csrfToken) setCsrfToken(data.csrfToken);
-        void fetchHoldings();
-        void fetchMyOrders();
+        void syncMarketState();
         setOrderMessage({ text: `Switched persona to ${username.toUpperCase()}`, error: false });
       }
     } catch (e: any) {
@@ -461,9 +526,7 @@ export default function App() {
               text: `Order ${data.restingOrder ? 'resting in book' : 'executed'} successfully! Seq #${data.seq}`,
               error: false,
             });
-            fetchSession();
-            fetchHoldings();
-            void fetchMyOrders();
+            void syncMarketState();
           } else {
             setOrderMessage({ text: data.error || 'Order rejected by exchange', error: true });
           }
@@ -479,7 +542,7 @@ export default function App() {
     }
   };
 
-  // --- INNOVATION 5: Authoritative Non-Blocking Order Cancellation ---
+  // --- Authoritative Non-Blocking Order Cancellation ---
   const handleCancelOrder = async (orderId: string, symbol?: string) => {
     if (cancellingOrderIds.has(orderId)) return;
     setCancellingOrderIds((prev) => new Set(prev).add(orderId));
@@ -493,13 +556,11 @@ export default function App() {
       });
 
       if (res.ok) {
-        // Optimistically remove from state
+        // Optimistically remove from state immediately
+        setMarketOrders((prev) => prev.filter((o) => o.id !== orderId));
         setMyOrders((prev) => prev.filter((o) => o.id !== orderId));
-        // Immediately synchronize authoritative state from server
-        void fetchSession();
-        void fetchHoldings();
-        void fetchMyOrders();
-        void fetchMarketStats();
+        // Immediately fetch authoritative in-memory RAM state from server
+        void syncMarketState();
       } else {
         const err = await res.json().catch(() => ({}));
         alert(`Order cancellation: ${err.error || res.statusText}`);
@@ -565,6 +626,7 @@ export default function App() {
         if (data.csrfToken) setCsrfToken(data.csrfToken);
         setShowAuthModal(false);
         await fetchSession();
+        void syncMarketState();
       }
     } catch (err: any) {
       if (err.name === 'AbortError') {
@@ -689,6 +751,9 @@ export default function App() {
   const estimatedCostMinor = toMinorUnits(estimatedCostDKC);
   const costPercentageOfAvailable = balance.available > 0 ? Math.min(100, Math.round((estimatedCostMinor / balance.available) * 100)) : 0;
 
+  // Active displayed orders depending on view mode
+  const displayedOrders = orderViewMode === 'market' ? marketOrders : myOrders;
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#06080F', color: '#F8FAFC' }}>
       {/* 1. Header / Navbar */}
@@ -802,7 +867,7 @@ export default function App() {
           <span style={{ fontSize: 11, color: '#64748B', fontWeight: 700, fontFamily: '"JetBrains Mono", monospace' }}>
             INSTRUMENT:
           </span>
-          {instruments.map((inst) => {
+          {instruments.filter((i) => !i.isBenchmark && i.symbol !== 'BENCH-X').map((inst) => {
             const isSelected = selectedSymbol === inst.symbol;
             return (
               <button
@@ -1066,10 +1131,10 @@ export default function App() {
                 <div style={{ marginTop: 8, color: '#64748B', fontSize: 10, fontWeight: 700 }}>
                   INSTRUMENT HOLDINGS:
                 </div>
-                {holdings.length === 0 ? (
+                {holdings.filter((h) => h.symbol !== 'BENCH-X').length === 0 ? (
                   <div style={{ color: '#64748B', fontSize: 11, padding: '4px 0' }}>No assets held</div>
                 ) : (
-                  holdings.map((h) => (
+                  holdings.filter((h) => h.symbol !== 'BENCH-X').map((h) => (
                     <div key={h.symbol} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
                       <span style={{ color: '#F8FAFC' }}>{h.symbol}</span>
                       <span>
@@ -1083,7 +1148,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Column 2: Centerpiece Canvas & Open Orders Table */}
+          {/* Column 2: Centerpiece Canvas & Unified Market vs Personal Orders Table */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {/* Centerpiece Visual: Liquidity Depth & Pulse Radar */}
             <div className="card" style={{ height: 340 }}>
@@ -1103,25 +1168,50 @@ export default function App() {
               </div>
             </div>
 
-            {/* Active Open Orders Table with Authoritative Immediate Cancel */}
+            {/* Active Resting Orders Table with Market vs Personal View & 1-Click Counter-Matching */}
             <div className="card" style={{ flex: 1 }}>
               <div className="card-header">
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span>ACTIVE RESTING ORDERS</span>
-                  <span
+                  {/* View Mode Toggle Pill */}
+                  <button
+                    type="button"
+                    onClick={() => setOrderViewMode('market')}
                     style={{
-                      background: '#1E293B',
-                      color: '#00F0FF',
-                      borderRadius: 10,
-                      padding: '1px 6px',
+                      background: orderViewMode === 'market' ? 'rgba(0, 240, 255, 0.2)' : 'transparent',
+                      border: `1px solid ${orderViewMode === 'market' ? '#00F0FF' : '#1E293B'}`,
+                      color: orderViewMode === 'market' ? '#00F0FF' : '#94A3B8',
+                      borderRadius: 4,
+                      padding: '3px 8px',
                       fontSize: 10,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      letterSpacing: 0.5,
+                      fontFamily: '"JetBrains Mono", monospace',
                     }}
                   >
-                    {myOrders.length}
-                  </span>
+                    MARKET ORDERS ({selectedSymbol}) [{marketOrders.length}]
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrderViewMode('my')}
+                    style={{
+                      background: orderViewMode === 'my' ? 'rgba(245, 158, 11, 0.2)' : 'transparent',
+                      border: `1px solid ${orderViewMode === 'my' ? '#F59E0B' : '#1E293B'}`,
+                      color: orderViewMode === 'my' ? '#F59E0B' : '#94A3B8',
+                      borderRadius: 4,
+                      padding: '3px 8px',
+                      fontSize: 10,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      letterSpacing: 0.5,
+                      fontFamily: '"JetBrains Mono", monospace',
+                    }}
+                  >
+                    MY ORDERS [{myOrders.length}]
+                  </button>
                 </div>
                 <button
-                  onClick={fetchMyOrders}
+                  onClick={syncMarketState}
                   style={{
                     background: 'transparent',
                     border: '1px solid #1E293B',
@@ -1129,21 +1219,26 @@ export default function App() {
                     borderRadius: 3,
                     padding: '2px 6px',
                     fontSize: 10,
+                    cursor: 'pointer',
+                    fontFamily: '"JetBrains Mono", monospace',
                   }}
                 >
                   SYNC
                 </button>
               </div>
+
               <div className="card-body" style={{ padding: 0 }}>
-                {myOrders.length === 0 ? (
+                {displayedOrders.length === 0 ? (
                   <div style={{ padding: 24, textAlign: 'center', color: '#64748B', fontSize: 12 }}>
-                    No active resting orders in RAM engine for current user. Click any row in the L2 ladder to submit an order.
+                    {orderViewMode === 'market'
+                      ? `No active resting orders in book for ${selectedSymbol}. Click any row in the L2 ladder to submit an order.`
+                      : `You have no active resting orders on ${selectedSymbol}.`}
                   </div>
                 ) : (
                   <table className="ladder-table">
                     <thead>
                       <tr>
-                        <th>INSTRUMENT</th>
+                        <th>TRADER</th>
                         <th>SIDE</th>
                         <th>PRICE</th>
                         <th>QTY</th>
@@ -1152,32 +1247,72 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {myOrders.map((o) => {
+                      {displayedOrders.map((o) => {
                         const isCancelling = cancellingOrderIds.has(o.id);
+                        const isMine = o.user_id === user?.id;
+                        const isAdmin = user?.role === 'admin';
+                        const trader = getTraderLabel(o.user_id);
+                        const traderColor = getTraderColor(o.user_id);
+
                         return (
                           <tr key={o.id} style={{ borderBottom: '1px solid #161F30' }}>
-                            <td style={{ color: '#F8FAFC', fontWeight: 600 }}>{o.symbol}</td>
+                            <td>
+                              <span
+                                style={{
+                                  background: 'rgba(15, 23, 42, 0.7)',
+                                  border: `1px solid ${traderColor}40`,
+                                  color: traderColor,
+                                  borderRadius: 3,
+                                  padding: '1px 5px',
+                                  fontSize: 9,
+                                  fontWeight: 800,
+                                }}
+                              >
+                                {trader}
+                              </span>
+                            </td>
                             <td style={{ color: o.side === 'BUY' ? '#00F0FF' : '#FF2A54', fontWeight: 700 }}>{o.side}</td>
                             <td>{formatDKC(o.price)}</td>
                             <td>{o.qty}</td>
                             <td>{o.remaining_qty}</td>
                             <td>
-                              <button
-                                onClick={() => handleCancelOrder(o.id, o.symbol)}
-                                disabled={isCancelling}
-                                style={{
-                                  background: isCancelling ? '#1E293B' : 'rgba(255, 42, 84, 0.15)',
-                                  color: isCancelling ? '#64748B' : '#FF2A54',
-                                  border: `1px solid ${isCancelling ? '#334155' : 'rgba(255, 42, 84, 0.4)'}`,
-                                  borderRadius: 3,
-                                  padding: '2px 8px',
-                                  fontSize: 10,
-                                  fontWeight: 700,
-                                  cursor: isCancelling ? 'not-allowed' : 'pointer',
-                                }}
-                              >
-                                {isCancelling ? 'Cancelling...' : 'Cancel'}
-                              </button>
+                              {isMine || isAdmin ? (
+                                <button
+                                  onClick={() => handleCancelOrder(o.id, o.symbol)}
+                                  disabled={isCancelling}
+                                  style={{
+                                    background: isCancelling ? '#1E293B' : 'rgba(255, 42, 84, 0.15)',
+                                    color: isCancelling ? '#64748B' : '#FF2A54',
+                                    border: `1px solid ${isCancelling ? '#334155' : 'rgba(255, 42, 84, 0.4)'}`,
+                                    borderRadius: 3,
+                                    padding: '2px 8px',
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    cursor: isCancelling ? 'not-allowed' : 'pointer',
+                                    fontFamily: '"JetBrains Mono", monospace',
+                                  }}
+                                >
+                                  {isCancelling ? 'Cancelling...' : 'Cancel'}
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => handleSnipeOrder(o)}
+                                  style={{
+                                    background: 'rgba(0, 240, 255, 0.12)',
+                                    color: '#00F0FF',
+                                    border: '1px solid rgba(0, 240, 255, 0.4)',
+                                    borderRadius: 3,
+                                    padding: '2px 8px',
+                                    fontSize: 10,
+                                    fontWeight: 800,
+                                    cursor: 'pointer',
+                                    fontFamily: '"JetBrains Mono", monospace',
+                                  }}
+                                  title={`Match against ${trader}'s ${o.side} order`}
+                                >
+                                  🎯 MATCH
+                                </button>
+                              )}
                             </td>
                           </tr>
                         );

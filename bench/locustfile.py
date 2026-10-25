@@ -8,9 +8,9 @@ from locust import FastHttpUser, task, between, events
 
 DEMO_USERS = [
     {"username": "admin", "password": "admin_darkhold_2026"},
-    {"username": "bob", "password": "demo_darkhold_2026"},
-    {"username": "carol", "password": "demo_darkhold_2026"},
+    {"username": "bench_maker", "password": "demo_darkhold_2026"},
     {"username": "bench_bot", "password": "demo_darkhold_2026"},
+    {"username": "bench_taker", "password": "demo_darkhold_2026"},
 ]
 
 user_cycler = itertools.cycle(DEMO_USERS)
