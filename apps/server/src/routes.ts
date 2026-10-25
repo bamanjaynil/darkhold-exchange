@@ -19,6 +19,7 @@ import {
   BuyAuctionSchema,
   RegisterUserSchema,
   LoginUserSchema,
+  calculateCollarCeiling,
 } from '@darkhold/shared';
 
 declare module 'fastify' {
@@ -256,7 +257,18 @@ export function registerRoutes(
   // --- 2. MARKET & INSTRUMENTS ---
 
   server.get('/api/instruments', async (_req, reply) => {
-    const list = Array.from(core.instruments.values()).filter((i) => !i.isBenchmark);
+    const list = Array.from(core.instruments.values())
+      .filter((i) => !i.isBenchmark)
+      .map((inst) => {
+        const ceiling = calculateCollarCeiling(inst.faceValue, inst.collarBps);
+        return {
+          ...inst,
+          referencePrice: inst.faceValue,
+          collarCeiling: ceiling,
+          minPrice: inst.tickSize || 100,
+          transferable: !inst.escrowRequired,
+        };
+      });
     reply.send(list);
   });
 
@@ -470,12 +482,33 @@ export function registerRoutes(
   server.get('/api/auctions', async (_req, reply) => {
     const now = core.clock.now();
     const list = Array.from(core.auctions.values()).map((auc) => {
-      const elapsed = Math.max(0, now - auc.startsAt);
-      const steps = Math.floor(elapsed / auc.stepIntervalMs);
-      const currentPrice = Math.max(auc.floorPrice, auc.startPrice - steps * auc.stepAmount);
+      let currentPrice = auc.floorPrice;
+      if (auc.status === 'SOLD_OUT' && auc.clearingPrice !== undefined) {
+        currentPrice = auc.clearingPrice;
+      } else if (auc.status === 'CANCELLED' && auc.clearingPrice !== undefined) {
+        currentPrice = auc.clearingPrice;
+      } else if (auc.status === 'ACTIVE') {
+        if (now >= auc.endsAt) {
+          currentPrice = auc.floorPrice;
+        } else {
+          const elapsed = Math.max(0, now - auc.startsAt);
+          const steps = Math.floor(elapsed / auc.stepIntervalMs);
+          currentPrice = Math.max(auc.floorPrice, auc.startPrice - steps * auc.stepAmount);
+        }
+      } else if (auc.clearingPrice !== undefined) {
+        currentPrice = auc.clearingPrice;
+      }
+
+      const totalSteps = auc.stepAmount > 0 ? Math.ceil((auc.startPrice - auc.floorPrice) / auc.stepAmount) : 1;
+      const decayPerSec = auc.stepIntervalMs > 0 ? (auc.stepAmount / (auc.stepIntervalMs / 1000)) : 0;
+      const timeRemainingSec = Math.max(0, Math.floor((auc.endsAt - now) / 1000));
+
       return {
         ...auc,
         currentPrice,
+        decayPerSec,
+        timeRemainingSec,
+        totalSteps,
       };
     });
     reply.send(list);
@@ -519,6 +552,21 @@ export function registerRoutes(
 
     if (!res.success) {
       return reply.status(400).send({ error: res.rejectedReason, currentPrice: res.currentPrice });
+    }
+    reply.send(res);
+  });
+
+  server.post('/api/auctions/:id/cancel', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const res = await core.dispatch<any>({
+      type: 'AUCTION_CANCEL',
+      auctionId: id,
+      userId: req.sessionUser!.id,
+      isAdmin: req.sessionUser!.role === 'admin',
+    });
+
+    if (!res.success) {
+      return reply.status(400).send({ error: res.rejectedReason });
     }
     reply.send(res);
   });

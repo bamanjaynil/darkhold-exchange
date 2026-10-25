@@ -28,6 +28,10 @@ type Instrument = {
   maxQtyPerOrder: number;
   escrowRequired: boolean;
   isBenchmark?: boolean;
+  referencePrice?: number;
+  collarCeiling?: number;
+  minPrice?: number;
+  transferable?: boolean;
 };
 
 type TradeItem = { id: string; price: number; qty: number; created_at: string; is_simulated: boolean; side?: string };
@@ -62,6 +66,94 @@ function getTraderColor(userId?: string): string {
   if (userId.includes('carol')) return '#A855F7';
   if (userId.includes('admin')) return '#F59E0B';
   return '#94A3B8';
+}
+
+function getInstrumentVisual(symbol: string) {
+  switch (symbol) {
+    case 'FEST-GA':
+      return {
+        name: 'General Admission Pass',
+        tag: 'Cyber Ticket',
+        color: '#00F0FF',
+        bg: 'rgba(0, 240, 255, 0.08)',
+        border: 'rgba(0, 240, 255, 0.35)',
+        svg: (
+          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+            <rect x="4" y="9" width="36" height="26" rx="4" fill="#060C18" stroke="#00F0FF" strokeWidth="1.5" />
+            <path d="M14 9V13M14 31V35" stroke="#00F0FF" strokeWidth="1.5" strokeDasharray="2 2" />
+            <circle cx="14" cy="9" r="3" fill="#0B101E" stroke="#00F0FF" strokeWidth="1.5" />
+            <circle cx="14" cy="35" r="3" fill="#0B101E" stroke="#00F0FF" strokeWidth="1.5" />
+            <line x1="20" y1="16" x2="34" y2="16" stroke="#00F0FF" strokeWidth="2" strokeLinecap="round" />
+            <line x1="20" y1="22" x2="30" y2="22" stroke="#67E8F9" strokeWidth="1.5" strokeLinecap="round" />
+            <line x1="20" y1="28" x2="26" y2="28" stroke="#94A3B8" strokeWidth="1.5" strokeLinecap="round" />
+            <rect x="7.5" y="15" width="3" height="14" fill="#00F0FF" opacity="0.7" rx="1" />
+          </svg>
+        ),
+      };
+    case 'FEST-VIP':
+      return {
+        name: 'VIP Sanctum Access Pass',
+        tag: 'Holo VIP Access',
+        color: '#F59E0B',
+        bg: 'rgba(245, 158, 11, 0.08)',
+        border: 'rgba(245, 158, 11, 0.35)',
+        svg: (
+          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+            <polygon points="22,4 38,13 38,31 22,40 6,31 6,13" fill="#0F120A" stroke="#F59E0B" strokeWidth="1.5" />
+            <polygon points="22,10 32,16 32,28 22,34 12,28 12,16" fill="rgba(245, 158, 11, 0.12)" stroke="#10B981" strokeWidth="1.2" />
+            <path d="M16 22L20 26L28 18" stroke="#F59E0B" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+            <circle cx="22" cy="7" r="1.5" fill="#F59E0B" />
+          </svg>
+        ),
+      };
+    case 'MERCH-CLOAK':
+      return {
+        name: 'Cloak of Levitation Replica',
+        tag: 'Stealth Cloak',
+        color: '#A855F7',
+        bg: 'rgba(168, 85, 247, 0.08)',
+        border: 'rgba(168, 85, 247, 0.35)',
+        svg: (
+          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+            <path d="M22 6C17 6 12 11 11 17C10 23 7 35 7 38H37C37 35 34 23 33 17C32 11 27 6 22 6Z" fill="#130D22" stroke="#A855F7" strokeWidth="1.5" />
+            <path d="M22 6V38" stroke="#C084FC" strokeWidth="1.2" strokeDasharray="3 3" />
+            <circle cx="22" cy="14" r="3" fill="#C084FC" />
+            <path d="M16 21C19 25 25 25 28 21" stroke="#A855F7" strokeWidth="1.8" strokeLinecap="round" />
+          </svg>
+        ),
+      };
+    case 'RELIC-AGAMOTTO':
+      return {
+        name: 'Eye of Agamotto Amulet',
+        tag: 'Soulbound / Non-Transferable',
+        color: '#EF4444',
+        bg: 'rgba(239, 68, 68, 0.08)',
+        border: 'rgba(239, 68, 68, 0.35)',
+        svg: (
+          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+            <ellipse cx="22" cy="20" rx="16" ry="11" fill="#180A0A" stroke="#EF4444" strokeWidth="1.5" />
+            <circle cx="22" cy="20" r="6" fill="rgba(239, 68, 68, 0.25)" stroke="#F87171" strokeWidth="1.5" />
+            <circle cx="22" cy="20" r="2.5" fill="#EF4444" />
+            <rect x="17" y="27" width="10" height="7" rx="2" fill="#EF4444" />
+            <path d="M19 27V24C19 22.3 20.3 21 22 21C23.7 21 25 22.3 25 24V27" stroke="#EF4444" strokeWidth="1.5" fill="none" />
+          </svg>
+        ),
+      };
+    default:
+      return {
+        name: symbol,
+        tag: 'Standard Asset',
+        color: '#94A3B8',
+        bg: 'rgba(148, 163, 184, 0.08)',
+        border: 'rgba(148, 163, 184, 0.35)',
+        svg: (
+          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+            <rect x="8" y="8" width="28" height="28" rx="4" fill="#0F172A" stroke="#94A3B8" strokeWidth="1.5" />
+            <circle cx="22" cy="22" r="6" stroke="#94A3B8" strokeWidth="1.5" />
+          </svg>
+        ),
+      };
+  }
 }
 
 export default function App() {
@@ -122,10 +214,13 @@ export default function App() {
   const [showCreateAuctionModal, setShowCreateAuctionModal] = useState<boolean>(false);
   const [auctionSymbol, setAuctionSymbol] = useState<string>('FEST-GA');
   const [auctionQty, setAuctionQty] = useState<number>(1);
-  const [auctionStartPrice, setAuctionStartPrice] = useState<number>(2000);
+  const [auctionStartPrice, setAuctionStartPrice] = useState<number>(1650);
   const [auctionFloorPrice, setAuctionFloorPrice] = useState<number>(1000);
-  const [auctionDurationSec, setAuctionDurationSec] = useState<number>(300);
+  const [auctionDurationSec, setAuctionDurationSec] = useState<number>(180);
+  const [auctionPacePreset, setAuctionPacePreset] = useState<'slow' | 'standard' | 'blitz' | 'custom'>('slow');
   const [auctionSubmitting, setAuctionSubmitting] = useState<boolean>(false);
+  const [auctionFilter, setAuctionFilter] = useState<'ALL' | 'LIVE' | 'SOLD'>('ALL');
+  const [buyQtyMap, setBuyQtyMap] = useState<Record<string, number>>({});
 
   // Auth Dialog State
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
@@ -250,6 +345,14 @@ export default function App() {
           setHoldings((hData || []).filter((h: any) => h.symbol !== 'BENCH-X'));
         }
       }
+
+      if (activeTab === 'auctions' || Math.random() < 0.25) {
+        const aucRes = await fetch('/api/auctions').catch(() => null);
+        if (aucRes && aucRes.ok) {
+          const aucList = await aucRes.json();
+          setAuctions(aucList || []);
+        }
+      }
     } catch {}
   };
 
@@ -258,7 +361,7 @@ export default function App() {
     syncMarketState();
     const interval = setInterval(syncMarketState, 1000);
     return () => clearInterval(interval);
-  }, [selectedSymbol, user?.id]);
+  }, [selectedSymbol, user?.id, activeTab]);
 
   // 2. WebSocket Connection with auto-reconnect
   useEffect(() => {
@@ -673,11 +776,34 @@ export default function App() {
       setShowAuthModal(true);
       return;
     }
+
+    const curInst = instruments.find((i) => i.symbol === auctionSymbol);
+    const ceilingMinor = curInst?.collarCeiling || (curInst?.faceValue ? Math.floor(curInst.faceValue * (1 + (curInst.collarBps || 1000) / 10000)) : 165000);
+    const startPriceMinor = toMinorUnits(auctionStartPrice);
+    const floorPriceMinor = toMinorUnits(auctionFloorPrice);
+
+    if (startPriceMinor > ceilingMinor) {
+      alert(`Start price exceeds collar ceiling of ${formatDKC(ceilingMinor)}`);
+      return;
+    }
+    if (floorPriceMinor >= startPriceMinor) {
+      alert('Floor price must be strictly lower than start price');
+      return;
+    }
+
+    const userHolding = holdings.find((h) => h.symbol === auctionSymbol)?.available || 0;
+    if (userHolding < auctionQty) {
+      alert(`Insufficient inventory: You only have ${userHolding} available units of ${auctionSymbol}`);
+      return;
+    }
+
     setAuctionSubmitting(true);
     try {
-      const startPriceMinor = toMinorUnits(auctionStartPrice);
-      const floorPriceMinor = toMinorUnits(auctionFloorPrice);
-      const stepAmountMinor = Math.max(100, Math.floor((startPriceMinor - floorPriceMinor) / 20));
+      const durationSec = Number(auctionDurationSec) || 180;
+      const stepIntervalMs = 1000;
+      const totalSteps = Math.max(1, durationSec);
+      const stepAmountMinor = Math.max(1, Math.ceil((startPriceMinor - floorPriceMinor) / totalSteps));
+
       const res = await fetch('/api/auctions/create', {
         method: 'POST',
         headers: {
@@ -691,16 +817,17 @@ export default function App() {
           startPrice: startPriceMinor,
           floorPrice: floorPriceMinor,
           stepAmount: stepAmountMinor,
-          stepIntervalMs: 2000,
-          durationSec: Number(auctionDurationSec),
+          stepIntervalMs,
+          durationSec,
         }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         alert('Dutch Auction created successfully!');
         setShowCreateAuctionModal(false);
-        fetch('/api/auctions').then((r) => { if (r.ok) r.json().then(setAuctions); });
-        fetchSession();
+        const aucRes = await fetch('/api/auctions').catch(() => null);
+        if (aucRes && aucRes.ok) setAuctions(await aucRes.json());
+        syncMarketState();
       } else {
         alert(`Auction creation failed: ${data.error || 'Server rejected request'}`);
       }
@@ -708,6 +835,60 @@ export default function App() {
       alert(`Network error creating auction: ${err.message || 'Error'}`);
     } finally {
       setAuctionSubmitting(false);
+    }
+  };
+
+  const handleBuyAuction = async (auc: any, qty: number) => {
+    if (!user) {
+      setShowAuthModal(true);
+      return;
+    }
+    const totalMinor = auc.currentPrice * qty;
+    if ((balance.available || 0) < totalMinor) {
+      alert(`Insufficient funds: Need ${formatDKC(totalMinor)}, available ${formatDKC(balance.available || 0)}`);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/auctions/${auc.id}/buy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
+        credentials: 'include',
+        body: JSON.stringify({ qty, maxPrice: auc.currentPrice }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        alert(`Successfully purchased ${qty} unit(s) of ${auc.symbol} at ${formatDKC(data.price || auc.currentPrice)}!`);
+        const aucRes = await fetch('/api/auctions').catch(() => null);
+        if (aucRes && aucRes.ok) setAuctions(await aucRes.json());
+        syncMarketState();
+      } else {
+        alert(`Auction buy error: ${data.error || 'Failed'}`);
+      }
+    } catch (err: any) {
+      alert(`Network error: ${err.message}`);
+    }
+  };
+
+  const handleCancelAuction = async (auctionId: string) => {
+    if (!confirm('Are you sure you want to cancel this auction and reclaim unsold units?')) return;
+    try {
+      const res = await fetch(`/api/auctions/${auctionId}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
+        credentials: 'include',
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        alert(`Auction cancelled! Reclaimed ${data.reclaimedQty || 0} unit(s) back to inventory.`);
+        const aucRes = await fetch('/api/auctions').catch(() => null);
+        if (aucRes && aucRes.ok) setAuctions(await aucRes.json());
+        syncMarketState();
+      } else {
+        alert(`Cancel failed: ${data.error || 'Error'}`);
+      }
+    } catch (err: any) {
+      alert(`Network error: ${err.message}`);
     }
   };
 
@@ -1424,88 +1605,595 @@ export default function App() {
 
       {/* Tab: Dutch Auctions */}
       {activeTab === 'auctions' && (
-        <div style={{ padding: 20, flex: 1, overflowY: 'auto' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div style={{ padding: 24, flex: 1, overflowY: 'auto' }}>
+          {/* Header & Controls */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
             <div>
-              <h2 style={{ fontSize: 18, color: '#00F0FF', margin: 0 }}>DUTCH AUCTIONS</h2>
-              <p style={{ color: '#94A3B8', fontSize: 12, margin: '4px 0 0' }}>
-                Descending price inventory distribution with collar ceiling guards.
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <h2 style={{ fontSize: 20, color: '#00F0FF', margin: 0, letterSpacing: '0.05em' }}>
+                  DUTCH AUCTION TERMINAL
+                </h2>
+                <span className="badge badge-ws-connected" style={{ fontSize: 10 }}>
+                  LIVE TICKING
+                </span>
+              </div>
+              <p style={{ color: '#94A3B8', fontSize: 12, margin: '6px 0 0' }}>
+                Descending-clock asset distribution with collar ceiling guards and instant multi-unit clearing settlement.
               </p>
             </div>
-            <button
-              onClick={() => setShowCreateAuctionModal(true)}
-              style={{
-                background: '#00F0FF',
-                color: '#06080F',
-                border: 'none',
-                borderRadius: 4,
-                padding: '8px 16px',
-                fontWeight: 700,
-                cursor: 'pointer',
-              }}
-            >
-              + Create Auction
-            </button>
+
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              {/* Filter Tabs */}
+              <div style={{ display: 'flex', background: '#090D1A', border: '1px solid #1E293B', borderRadius: 6, padding: 3, gap: 4 }}>
+                <button
+                  onClick={() => setAuctionFilter('ALL')}
+                  style={{
+                    background: auctionFilter === 'ALL' ? '#1E293B' : 'transparent',
+                    color: auctionFilter === 'ALL' ? '#00F0FF' : '#94A3B8',
+                    border: 'none',
+                    borderRadius: 4,
+                    padding: '6px 12px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ALL ({auctions.length})
+                </button>
+                <button
+                  onClick={() => setAuctionFilter('LIVE')}
+                  style={{
+                    background: auctionFilter === 'LIVE' ? '#1E293B' : 'transparent',
+                    color: auctionFilter === 'LIVE' ? '#10B981' : '#94A3B8',
+                    border: 'none',
+                    borderRadius: 4,
+                    padding: '6px 12px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ⚡ LIVE ({auctions.filter((a) => a.status === 'ACTIVE').length})
+                </button>
+                <button
+                  onClick={() => setAuctionFilter('SOLD')}
+                  style={{
+                    background: auctionFilter === 'SOLD' ? '#1E293B' : 'transparent',
+                    color: auctionFilter === 'SOLD' ? '#F59E0B' : '#94A3B8',
+                    border: 'none',
+                    borderRadius: 4,
+                    padding: '6px 12px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ✓ CLEARED ({auctions.filter((a) => a.status === 'SOLD_OUT' || a.status === 'CANCELLED').length})
+                </button>
+              </div>
+
+              <button
+                onClick={() => {
+                  fetch('/api/auctions').then((r) => { if (r.ok) r.json().then(setAuctions); });
+                  syncMarketState();
+                }}
+                style={{
+                  background: '#0F172A',
+                  color: '#94A3B8',
+                  border: '1px solid #334155',
+                  borderRadius: 6,
+                  padding: '7px 12px',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+                title="Refresh Auctions"
+              >
+                🔄
+              </button>
+
+              <button
+                onClick={() => {
+                  if (!user) {
+                    setShowAuthModal(true);
+                    return;
+                  }
+                  setShowCreateAuctionModal(true);
+                }}
+                style={{
+                  background: 'linear-gradient(135deg, #00F0FF 0%, #0284C7 100%)',
+                  color: '#06080F',
+                  border: 'none',
+                  borderRadius: 6,
+                  padding: '8px 18px',
+                  fontWeight: 800,
+                  fontSize: 12,
+                  letterSpacing: '0.04em',
+                  cursor: 'pointer',
+                  boxShadow: '0 0 15px rgba(0, 240, 255, 0.3)',
+                }}
+              >
+                + CREATE AUCTION
+              </button>
+            </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 14 }}>
-            {auctions.map((auc) => (
-              <div key={auc.id} className="card" style={{ padding: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <span style={{ fontWeight: 700, fontSize: 14, color: '#F8FAFC' }}>{auc.symbol}</span>
-                  <span className={`badge ${auc.status === 'ACTIVE' ? 'badge-ws-connected' : 'badge-ws-disconnected'}`}>
-                    {auc.status}
-                  </span>
-                </div>
-                <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#64748B' }}>Current Price:</span>
-                    <strong style={{ color: '#F59E0B' }}>{formatDKC(auc.currentPrice)}</strong>
+          {/* Auction Cards Grid */}
+          {(() => {
+            const filteredAuctions = auctions.filter((auc) => {
+              if (auctionFilter === 'LIVE') return auc.status === 'ACTIVE';
+              if (auctionFilter === 'SOLD') return auc.status === 'SOLD_OUT' || auc.status === 'CANCELLED';
+              return true;
+            });
+
+            if (filteredAuctions.length === 0) {
+              return (
+                <div className="card" style={{ padding: 48, textAlign: 'center', color: '#64748B' }}>
+                  <div style={{ fontSize: 32, marginBottom: 12 }}>🏛️</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#94A3B8', marginBottom: 6 }}>
+                    No {auctionFilter !== 'ALL' ? auctionFilter : ''} Dutch Auctions Found
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#64748B' }}>Remaining Qty:</span>
-                    <span>{auc.qtyRemaining} / {auc.qtyTotal}</span>
+                  <div style={{ fontSize: 12, marginBottom: 16 }}>
+                    Launch descending price auctions to distribute inventory with automated collar guards.
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#64748B' }}>Floor Price:</span>
-                    <span>{formatDKC(auc.floorPrice)}</span>
-                  </div>
-                </div>
-                {auc.status === 'ACTIVE' && (
                   <button
-                    onClick={async () => {
-                      if (!user) return setShowAuthModal(true);
-                      const res = await fetch(`/api/auctions/${auc.id}/buy`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
-                        credentials: 'include',
-                        body: JSON.stringify({ qty: 1, maxPrice: auc.currentPrice }),
-                      });
-                      if (res.ok) {
-                        alert('Auction purchase successful!');
-                        fetch('/api/auctions').then((r) => { if (r.ok) r.json().then(setAuctions); });
-                        fetchSession();
-                      } else {
-                        const err = await res.json().catch(() => ({}));
-                        alert(`Auction buy error: ${err.error || 'Failed'}`);
-                      }
-                    }}
+                    onClick={() => setShowCreateAuctionModal(true)}
                     style={{
-                      background: '#10B981',
+                      background: '#00F0FF',
                       color: '#06080F',
                       border: 'none',
                       borderRadius: 4,
-                      padding: '8px',
+                      padding: '8px 16px',
                       fontWeight: 700,
                       cursor: 'pointer',
                     }}
                   >
-                    Buy 1 Unit Now
+                    + Create First Auction
                   </button>
-                )}
+                </div>
+              );
+            }
+
+            return (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 16 }}>
+                {filteredAuctions.map((auc) => {
+                  const visual = getInstrumentVisual(auc.symbol);
+                  const isSeller = user?.id === auc.sellerUserId;
+                  const selectedQty = buyQtyMap[auc.id] !== undefined ? buyQtyMap[auc.id] : 1;
+                  const currentPrice = auc.currentPrice;
+                  const totalMinor = currentPrice * selectedQty;
+                  const hasFunds = (balance.available || 0) >= totalMinor;
+
+                  const priceDiff = Math.max(1, auc.startPrice - auc.floorPrice);
+                  const currentDiff = Math.max(0, currentPrice - auc.floorPrice);
+                  const progressPct = auc.status === 'ACTIVE'
+                    ? Math.max(4, Math.min(100, (currentDiff / priceDiff) * 100))
+                    : 100;
+
+                  return (
+                    <div
+                      key={auc.id}
+                      className="card"
+                      style={{
+                        padding: 18,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 14,
+                        border: `1px solid ${visual.border}`,
+                        background: 'linear-gradient(180deg, rgba(15, 23, 42, 0.6) 0%, #060913 100%)',
+                        boxShadow: isSeller ? '0 0 20px rgba(0, 240, 255, 0.08)' : 'none',
+                        position: 'relative',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      {/* Top Header: Visual Icon + Name + Badges */}
+                      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                        <div
+                          style={{
+                            width: 50,
+                            height: 50,
+                            borderRadius: 8,
+                            background: visual.bg,
+                            border: `1px solid ${visual.border}`,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexShrink: 0,
+                          }}
+                        >
+                          {visual.svg}
+                        </div>
+
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontWeight: 800, fontSize: 16, color: '#F8FAFC', letterSpacing: '0.02em' }}>
+                              {auc.symbol}
+                            </span>
+                            {auc.status === 'ACTIVE' && (
+                              <span className="badge badge-ws-connected" style={{ fontSize: 10, padding: '3px 8px' }}>
+                                ⚡ ACTIVE DECAY
+                              </span>
+                            )}
+                            {auc.status === 'SOLD_OUT' && (
+                              <span
+                                style={{
+                                  background: 'rgba(16, 185, 129, 0.15)',
+                                  color: '#10B981',
+                                  border: '1px solid rgba(16, 185, 129, 0.4)',
+                                  borderRadius: 4,
+                                  fontSize: 10,
+                                  fontWeight: 800,
+                                  padding: '3px 8px',
+                                }}
+                              >
+                                ✓ CLEARED & SOLD OUT
+                              </span>
+                            )}
+                            {auc.status === 'CANCELLED' && (
+                              <span
+                                style={{
+                                  background: 'rgba(239, 68, 68, 0.15)',
+                                  color: '#EF4444',
+                                  border: '1px solid rgba(239, 68, 68, 0.4)',
+                                  borderRadius: 4,
+                                  fontSize: 10,
+                                  fontWeight: 800,
+                                  padding: '3px 8px',
+                                }}
+                              >
+                                ✕ CANCELLED
+                              </span>
+                            )}
+                            {auc.status === 'EXPIRED' && (
+                              <span
+                                style={{
+                                  background: 'rgba(100, 116, 139, 0.15)',
+                                  color: '#94A3B8',
+                                  border: '1px solid rgba(100, 116, 139, 0.4)',
+                                  borderRadius: 4,
+                                  fontSize: 10,
+                                  fontWeight: 800,
+                                  padding: '3px 8px',
+                                }}
+                              >
+                                ⏱ EXPIRED
+                              </span>
+                            )}
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3 }}>
+                            <span style={{ fontSize: 11, color: visual.color, fontWeight: 600 }}>{visual.tag}</span>
+                            <span style={{ fontSize: 11, color: '#475569' }}>•</span>
+                            <span style={{ fontSize: 11, color: '#64748B' }}>#{auc.id.slice(0, 12)}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Seller Badge & ID Bar */}
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          padding: '6px 10px',
+                          background: 'rgba(15, 23, 42, 0.7)',
+                          borderRadius: 4,
+                          fontSize: 11,
+                          border: '1px solid #1E293B',
+                        }}
+                      >
+                        <span style={{ color: '#64748B' }}>Seller:</span>
+                        {isSeller ? (
+                          <span
+                            style={{
+                              color: '#00F0FF',
+                              fontWeight: 800,
+                              background: 'rgba(0, 240, 255, 0.12)',
+                              padding: '2px 6px',
+                              borderRadius: 3,
+                              border: '1px solid rgba(0, 240, 255, 0.3)',
+                            }}
+                          >
+                            YOU ({user?.username.toUpperCase()})
+                          </span>
+                        ) : (
+                          <span style={{ color: getTraderColor(auc.sellerUserId), fontWeight: 700 }}>
+                            {getTraderLabel(auc.sellerUserId)}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Tri-Point Price Indicators */}
+                      <div
+                        style={{
+                          background: '#040711',
+                          border: '1px solid #1E293B',
+                          borderRadius: 6,
+                          padding: '12px 14px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 10,
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <span style={{ fontSize: 10, color: '#64748B', fontWeight: 600 }}>START CEILING</span>
+                            <span style={{ fontSize: 12, color: '#94A3B8', fontWeight: 700 }}>{formatDKC(auc.startPrice)}</span>
+                          </div>
+
+                          <div style={{ textAlign: 'center' }}>
+                            {auc.status === 'SOLD_OUT' ? (
+                              <>
+                                <span style={{ fontSize: 10, color: '#10B981', fontWeight: 800, letterSpacing: '0.04em' }}>
+                                  FINAL CLEARING PRICE (LOCKED)
+                                </span>
+                                <div style={{ fontSize: 19, color: '#10B981', fontWeight: 900, textShadow: '0 0 12px rgba(16, 185, 129, 0.4)' }}>
+                                  {formatDKC(auc.clearingPrice || auc.currentPrice)}
+                                </div>
+                              </>
+                            ) : auc.status === 'CANCELLED' ? (
+                              <>
+                                <span style={{ fontSize: 10, color: '#EF4444', fontWeight: 800 }}>PRICE AT CANCEL</span>
+                                <div style={{ fontSize: 17, color: '#EF4444', fontWeight: 800 }}>
+                                  {formatDKC(auc.clearingPrice || auc.currentPrice)}
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <span style={{ fontSize: 10, color: '#F59E0B', fontWeight: 800, letterSpacing: '0.04em' }}>
+                                  LIVE CURRENT PRICE
+                                </span>
+                                <div style={{ fontSize: 19, color: '#F59E0B', fontWeight: 900, textShadow: '0 0 12px rgba(245, 158, 11, 0.4)' }}>
+                                  {formatDKC(auc.currentPrice)}
+                                </div>
+                              </>
+                            )}
+                          </div>
+
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                            <span style={{ fontSize: 10, color: '#64748B', fontWeight: 600 }}>FLOOR MINIMUM</span>
+                            <span style={{ fontSize: 12, color: '#94A3B8', fontWeight: 700 }}>{formatDKC(auc.floorPrice)}</span>
+                          </div>
+                        </div>
+
+                        {/* Animated Visual Decay Progress Bar */}
+                        <div>
+                          <div
+                            style={{
+                              height: 6,
+                              background: '#1E293B',
+                              borderRadius: 3,
+                              overflow: 'hidden',
+                              position: 'relative',
+                            }}
+                          >
+                            <div
+                              style={{
+                                height: '100%',
+                                width: `${progressPct}%`,
+                                background: auc.status === 'SOLD_OUT'
+                                  ? '#10B981'
+                                  : auc.status === 'CANCELLED'
+                                  ? '#EF4444'
+                                  : 'linear-gradient(90deg, #F59E0B 0%, #00F0FF 100%)',
+                                borderRadius: 3,
+                                transition: 'width 0.4s ease',
+                                boxShadow: auc.status === 'ACTIVE' ? '0 0 8px rgba(0, 240, 255, 0.6)' : 'none',
+                              }}
+                            />
+                          </div>
+
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#64748B', marginTop: 5 }}>
+                            {auc.status === 'ACTIVE' ? (
+                              <>
+                                <span>📉 Decay: -{(auc.decayPerSec ? auc.decayPerSec / 100 : 1).toFixed(2)} DKC/sec</span>
+                                <span>⏱ {auc.timeRemainingSec !== undefined ? auc.timeRemainingSec : 0}s to floor</span>
+                              </>
+                            ) : auc.status === 'SOLD_OUT' ? (
+                              <span style={{ color: '#10B981', fontWeight: 700 }}>✓ Settled at clearing price. Decay stopped.</span>
+                            ) : (
+                              <span style={{ color: '#EF4444', fontWeight: 700 }}>✕ Auction stopped by seller.</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Inventory Meter */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
+                          <span style={{ color: '#64748B' }}>Available Inventory:</span>
+                          <span style={{ color: '#F8FAFC', fontWeight: 700 }}>
+                            {auc.qtyRemaining} / {auc.qtyTotal} Units
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', gap: 3 }}>
+                          {Array.from({ length: Math.min(10, auc.qtyTotal) }).map((_, idx) => {
+                            const unitThreshold = (idx + 1) * (auc.qtyTotal / Math.min(10, auc.qtyTotal));
+                            const isFilled = auc.qtyRemaining >= unitThreshold;
+                            return (
+                              <div
+                                key={idx}
+                                style={{
+                                  flex: 1,
+                                  height: 5,
+                                  borderRadius: 2,
+                                  background: isFilled ? (visual.color || '#00F0FF') : '#1E293B',
+                                  opacity: isFilled ? 1 : 0.3,
+                                }}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Buy Selector / Seller Cancel Actions */}
+                      <div style={{ marginTop: 'auto', paddingTop: 6 }}>
+                        {auc.status === 'ACTIVE' ? (
+                          isSeller ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <div style={{ fontSize: 11, color: '#64748B', textAlign: 'center' }}>
+                                (You created this auction • Self-buying disabled)
+                              </div>
+                              <button
+                                onClick={() => handleCancelAuction(auc.id)}
+                                style={{
+                                  background: 'rgba(239, 68, 68, 0.15)',
+                                  color: '#EF4444',
+                                  border: '1px solid rgba(239, 68, 68, 0.4)',
+                                  borderRadius: 5,
+                                  padding: '10px 14px',
+                                  fontWeight: 800,
+                                  fontSize: 12,
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: 6,
+                                }}
+                              >
+                                🛑 Cancel Auction & Reclaim {auc.qtyRemaining} Unit(s)
+                              </button>
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              {/* Multi-Qty Selector */}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 11, color: '#64748B', fontWeight: 700 }}>QTY:</span>
+                                <div style={{ display: 'flex', alignItems: 'center', background: '#0F172A', border: '1px solid #334155', borderRadius: 4 }}>
+                                  <button
+                                    onClick={() => setBuyQtyMap({ ...buyQtyMap, [auc.id]: Math.max(1, selectedQty - 1) })}
+                                    style={{
+                                      background: 'transparent',
+                                      color: '#94A3B8',
+                                      border: 'none',
+                                      padding: '4px 10px',
+                                      fontWeight: 800,
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    -
+                                  </button>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max={auc.qtyRemaining}
+                                    value={selectedQty}
+                                    onChange={(e) => {
+                                      const val = Math.max(1, Math.min(auc.qtyRemaining, parseInt(e.target.value, 10) || 1));
+                                      setBuyQtyMap({ ...buyQtyMap, [auc.id]: val });
+                                    }}
+                                    style={{
+                                      width: 44,
+                                      textAlign: 'center',
+                                      background: 'transparent',
+                                      color: '#F8FAFC',
+                                      border: 'none',
+                                      fontWeight: 800,
+                                      fontSize: 13,
+                                    }}
+                                  />
+                                  <button
+                                    onClick={() => setBuyQtyMap({ ...buyQtyMap, [auc.id]: Math.min(auc.qtyRemaining, selectedQty + 1) })}
+                                    style={{
+                                      background: 'transparent',
+                                      color: '#94A3B8',
+                                      border: 'none',
+                                      padding: '4px 10px',
+                                      fontWeight: 800,
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    +
+                                  </button>
+                                </div>
+
+                                <button
+                                  onClick={() => setBuyQtyMap({ ...buyQtyMap, [auc.id]: auc.qtyRemaining })}
+                                  style={{
+                                    background: '#1E293B',
+                                    color: '#00F0FF',
+                                    border: 'none',
+                                    borderRadius: 4,
+                                    padding: '4px 8px',
+                                    fontSize: 10,
+                                    fontWeight: 800,
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  MAX ({auc.qtyRemaining})
+                                </button>
+
+                                <div style={{ marginLeft: 'auto', textAlign: 'right', fontSize: 11 }}>
+                                  <span style={{ color: '#64748B' }}>Total: </span>
+                                  <strong style={{ color: '#F59E0B' }}>{formatDKC(totalMinor)}</strong>
+                                </div>
+                              </div>
+
+                              {/* Snipe Action Button */}
+                              <button
+                                onClick={() => handleBuyAuction(auc, selectedQty)}
+                                disabled={!hasFunds}
+                                style={{
+                                  background: hasFunds
+                                    ? 'linear-gradient(135deg, #10B981 0%, #059669 100%)'
+                                    : '#1E293B',
+                                  color: hasFunds ? '#06080F' : '#64748B',
+                                  border: 'none',
+                                  borderRadius: 5,
+                                  padding: '10px 14px',
+                                  fontWeight: 800,
+                                  fontSize: 12,
+                                  cursor: hasFunds ? 'pointer' : 'not-allowed',
+                                  boxShadow: hasFunds ? '0 0 15px rgba(16, 185, 129, 0.3)' : 'none',
+                                  letterSpacing: '0.03em',
+                                }}
+                              >
+                                {hasFunds ? (
+                                  `⚡ SNIPE ${selectedQty} UNIT${selectedQty > 1 ? 'S' : ''} @ ${formatDKC(totalMinor)}`
+                                ) : (
+                                  `⚠️ Insufficient DKC (Need ${formatDKC(totalMinor)})`
+                                )}
+                              </button>
+                            </div>
+                          )
+                        ) : auc.status === 'SOLD_OUT' ? (
+                          <div
+                            style={{
+                              background: 'rgba(16, 185, 129, 0.1)',
+                              border: '1px solid rgba(16, 185, 129, 0.3)',
+                              borderRadius: 5,
+                              padding: '10px',
+                              textAlign: 'center',
+                              color: '#10B981',
+                              fontWeight: 800,
+                              fontSize: 12,
+                            }}
+                          >
+                            ✓ SETTLED AT {formatDKC(auc.clearingPrice || auc.currentPrice)} (100% SOLD)
+                          </div>
+                        ) : (
+                          <div
+                            style={{
+                              background: 'rgba(239, 68, 68, 0.1)',
+                              border: '1px solid rgba(239, 68, 68, 0.3)',
+                              borderRadius: 5,
+                              padding: '10px',
+                              textAlign: 'center',
+                              color: '#EF4444',
+                              fontWeight: 800,
+                              fontSize: 12,
+                            }}
+                          >
+                            ✕ AUCTION CANCELLED
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))}
-          </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1807,71 +2495,518 @@ export default function App() {
       )}
 
       {/* 7. Create Auction Modal */}
-      {showCreateAuctionModal && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.75)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 2000,
-          }}
-        >
-          <div className="card" style={{ width: 400, padding: 24 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <strong style={{ fontSize: 15, color: '#00F0FF' }}>CREATE DUTCH AUCTION</strong>
-              <button
-                onClick={() => setShowCreateAuctionModal(false)}
-                style={{ background: 'transparent', border: 'none', color: '#64748B', fontSize: 16, cursor: 'pointer' }}
-              >
-                ✕
-              </button>
+      {showCreateAuctionModal && (() => {
+        const transferableInstruments = instruments.filter((i) => !i.isBenchmark && !i.escrowRequired);
+        const curInst = instruments.find((i) => i.symbol === auctionSymbol) || transferableInstruments[0] || instruments[0];
+        const availHolding = holdings.find((h) => h.symbol === auctionSymbol)?.available || 0;
+        const ceilingMinor = curInst?.collarCeiling || (curInst?.faceValue ? Math.floor(curInst.faceValue * (1 + (curInst.collarBps || 1000) / 10000)) : 165000);
+        const ceilingDKC = ceilingMinor / 100;
+        const faceValueDKC = (curInst?.faceValue || 150000) / 100;
+        const collarPct = (curInst?.collarBps || 1000) / 100;
+
+        const isCeilingViolated = auctionStartPrice > ceilingDKC;
+        const isFloorInvalid = auctionFloorPrice >= auctionStartPrice || auctionFloorPrice < 1;
+        const isInventoryInsufficient = availHolding < auctionQty || availHolding === 0;
+
+        const priceDiff = Math.max(0, auctionStartPrice - auctionFloorPrice);
+        const dropRate = auctionDurationSec > 0 ? (priceDiff / auctionDurationSec).toFixed(2) : '0';
+
+        const visual = getInstrumentVisual(auctionSymbol);
+
+        return (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0, 0, 0, 0.82)',
+              backdropFilter: 'blur(4px)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 2000,
+            }}
+          >
+            <div
+              className="card"
+              style={{
+                width: 480,
+                maxHeight: '90vh',
+                overflowY: 'auto',
+                padding: 24,
+                border: `1px solid ${visual.border}`,
+                boxShadow: '0 0 35px rgba(0, 240, 255, 0.15)',
+              }}
+            >
+              {/* Modal Header */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div
+                    style={{
+                      width: 38,
+                      height: 38,
+                      borderRadius: 6,
+                      background: visual.bg,
+                      border: `1px solid ${visual.border}`,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    {visual.svg}
+                  </div>
+                  <div>
+                    <strong style={{ fontSize: 16, color: '#00F0FF', letterSpacing: '0.04em' }}>
+                      CREATE DUTCH AUCTION
+                    </strong>
+                    <div style={{ fontSize: 11, color: '#94A3B8' }}>
+                      Descending price distribution with automatic collar guards
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowCreateAuctionModal(false)}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: '#64748B',
+                    fontSize: 18,
+                    cursor: 'pointer',
+                    padding: 4,
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+
+              <form onSubmit={handleCreateAuction} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                {/* 1. Instrument Selector */}
+                <div>
+                  <label style={{ fontSize: 11, color: '#94A3B8', display: 'block', marginBottom: 4, fontWeight: 700 }}>
+                    SELECT TRANSFERABLE ASSET
+                  </label>
+                  <select
+                    value={auctionSymbol}
+                    onChange={(e) => {
+                      const sym = e.target.value;
+                      setAuctionSymbol(sym);
+                      const inst = instruments.find((i) => i.symbol === sym);
+                      const ceil = inst?.collarCeiling || (inst?.faceValue ? Math.floor(inst.faceValue * (1 + (inst.collarBps || 1000) / 10000)) : 165000);
+                      setAuctionStartPrice(ceil / 100);
+                      setAuctionFloorPrice(Math.round((ceil / 100) * 0.6));
+                    }}
+                    style={{
+                      width: '100%',
+                      background: '#090D1A',
+                      border: '1px solid #1E293B',
+                      borderRadius: 5,
+                      padding: '8px 10px',
+                      color: '#F8FAFC',
+                      fontSize: 13,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {transferableInstruments.map((i) => {
+                      const units = holdings.find((h) => h.symbol === i.symbol)?.available || 0;
+                      return (
+                        <option key={i.symbol} value={i.symbol}>
+                          {i.symbol} — {i.name} (You own: {units} units)
+                        </option>
+                      );
+                    })}
+                  </select>
+
+                  {/* Inventory Alert Banner */}
+                  {availHolding === 0 ? (
+                    <div
+                      style={{
+                        marginTop: 8,
+                        padding: '8px 12px',
+                        background: 'rgba(239, 68, 68, 0.12)',
+                        border: '1px solid rgba(239, 68, 68, 0.35)',
+                        borderRadius: 5,
+                        fontSize: 11,
+                        color: '#FCA5A5',
+                      }}
+                    >
+                      ⚠️ <strong>Zero Available Units:</strong> You own 0 available units of {auctionSymbol}. You must possess inventory in your wallet before creating an auction.
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 4, fontSize: 11, color: '#10B981', display: 'flex', justifyContent: 'space-between' }}>
+                      <span>✓ Available in wallet:</span>
+                      <strong>{availHolding} unit(s) available</strong>
+                    </div>
+                  )}
+                </div>
+
+                {/* 2. Quantity Selector */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <label style={{ fontSize: 11, color: '#94A3B8', fontWeight: 700 }}>QUANTITY TO AUCTION</label>
+                    <span style={{ fontSize: 11, color: '#64748B' }}>Max: {availHolding}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input
+                      type="number"
+                      min="1"
+                      max={Math.max(1, availHolding)}
+                      value={auctionQty}
+                      onChange={(e) => setAuctionQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                      style={{
+                        flex: 1,
+                        background: '#090D1A',
+                        border: '1px solid #1E293B',
+                        borderRadius: 5,
+                        padding: '8px 10px',
+                        color: '#F8FAFC',
+                        fontSize: 13,
+                        fontWeight: 700,
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setAuctionQty(1)}
+                      style={{
+                        background: '#1E293B',
+                        color: '#94A3B8',
+                        border: 'none',
+                        borderRadius: 4,
+                        padding: '0 10px',
+                        fontSize: 11,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      1 Unit
+                    </button>
+                    {availHolding > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setAuctionQty(Math.max(1, Math.floor(availHolding / 2)))}
+                        style={{
+                          background: '#1E293B',
+                          color: '#94A3B8',
+                          border: 'none',
+                          borderRadius: 4,
+                          padding: '0 10px',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Half
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setAuctionQty(Math.max(1, availHolding))}
+                      style={{
+                        background: '#00F0FF',
+                        color: '#06080F',
+                        border: 'none',
+                        borderRadius: 4,
+                        padding: '0 10px',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      ALL ({availHolding})
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3. Collar Ceiling Guidance & Start Price */}
+                <div>
+                  <div
+                    style={{
+                      background: 'rgba(0, 240, 255, 0.05)',
+                      border: '1px solid rgba(0, 240, 255, 0.2)',
+                      borderRadius: 5,
+                      padding: '8px 10px',
+                      marginBottom: 8,
+                      fontSize: 11,
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ color: '#00F0FF', fontWeight: 700 }}>
+                        Collar Ceiling Guard: Max {ceilingDKC.toLocaleString()} DKC
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setAuctionStartPrice(ceilingDKC)}
+                        style={{
+                          background: 'rgba(0, 240, 255, 0.15)',
+                          color: '#00F0FF',
+                          border: '1px solid rgba(0, 240, 255, 0.4)',
+                          borderRadius: 3,
+                          padding: '2px 6px',
+                          fontSize: 10,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        [Set Max: {ceilingDKC} DKC]
+                      </button>
+                    </div>
+                    <div style={{ color: '#64748B', marginTop: 2, fontSize: 10 }}>
+                      Face Value: {faceValueDKC.toLocaleString()} DKC +{collarPct}% anti-scalping circuit breaker.
+                    </div>
+                  </div>
+
+                  <label style={{ fontSize: 11, color: '#94A3B8', display: 'block', marginBottom: 4, fontWeight: 700 }}>
+                    STARTING PRICE (DKC)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={auctionStartPrice}
+                    onChange={(e) => setAuctionStartPrice(parseFloat(e.target.value) || 0)}
+                    style={{
+                      width: '100%',
+                      background: '#090D1A',
+                      border: `1px solid ${isCeilingViolated ? '#EF4444' : '#1E293B'}`,
+                      borderRadius: 5,
+                      padding: '8px 10px',
+                      color: isCeilingViolated ? '#EF4444' : '#F8FAFC',
+                      fontSize: 13,
+                      fontWeight: 700,
+                    }}
+                  />
+                  {isCeilingViolated && (
+                    <div style={{ fontSize: 11, color: '#EF4444', marginTop: 4 }}>
+                      ❌ Start price exceeds exchange collar ceiling of {ceilingDKC.toLocaleString()} DKC.
+                    </div>
+                  )}
+                </div>
+
+                {/* 4. Floor Price Guidance */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <label style={{ fontSize: 11, color: '#94A3B8', fontWeight: 700 }}>FLOOR PRICE (DKC)</label>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <button
+                        type="button"
+                        onClick={() => setAuctionFloorPrice(Math.max(1, Math.round(auctionStartPrice * 0.8)))}
+                        style={{
+                          background: '#1E293B',
+                          color: '#94A3B8',
+                          border: 'none',
+                          borderRadius: 3,
+                          padding: '1px 6px',
+                          fontSize: 10,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        -20%
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAuctionFloorPrice(Math.max(1, Math.round(auctionStartPrice * 0.5)))}
+                        style={{
+                          background: '#1E293B',
+                          color: '#94A3B8',
+                          border: 'none',
+                          borderRadius: 3,
+                          padding: '1px 6px',
+                          fontSize: 10,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        -50%
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAuctionFloorPrice(1)}
+                        style={{
+                          background: '#1E293B',
+                          color: '#94A3B8',
+                          border: 'none',
+                          borderRadius: 3,
+                          padding: '1px 6px',
+                          fontSize: 10,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Min: 1 DKC
+                      </button>
+                    </div>
+                  </div>
+
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={auctionFloorPrice}
+                    onChange={(e) => setAuctionFloorPrice(parseFloat(e.target.value) || 0)}
+                    style={{
+                      width: '100%',
+                      background: '#090D1A',
+                      border: `1px solid ${isFloorInvalid ? '#EF4444' : '#1E293B'}`,
+                      borderRadius: 5,
+                      padding: '8px 10px',
+                      color: isFloorInvalid ? '#EF4444' : '#F8FAFC',
+                      fontSize: 13,
+                      fontWeight: 700,
+                    }}
+                  />
+                  {isFloorInvalid && (
+                    <div style={{ fontSize: 11, color: '#EF4444', marginTop: 4 }}>
+                      ❌ Floor price must be at least 1.00 DKC and strictly lower than Start Price ({auctionStartPrice} DKC).
+                    </div>
+                  )}
+                </div>
+
+                {/* 5. Decay Pace / Duration Selector */}
+                <div>
+                  <label style={{ fontSize: 11, color: '#94A3B8', display: 'block', marginBottom: 6, fontWeight: 700 }}>
+                    DECAY PACE / DURATION PRESETS
+                  </label>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuctionDurationSec(180);
+                        setAuctionPacePreset('slow');
+                      }}
+                      style={{
+                        background: auctionPacePreset === 'slow' ? '#1E293B' : '#0F172A',
+                        color: auctionPacePreset === 'slow' ? '#00F0FF' : '#94A3B8',
+                        border: `1px solid ${auctionPacePreset === 'slow' ? '#00F0FF' : '#334155'}`,
+                        borderRadius: 4,
+                        padding: '6px 4px',
+                        fontSize: 10,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      🐢 Slow (180s)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuctionDurationSec(90);
+                        setAuctionPacePreset('standard');
+                      }}
+                      style={{
+                        background: auctionPacePreset === 'standard' ? '#1E293B' : '#0F172A',
+                        color: auctionPacePreset === 'standard' ? '#10B981' : '#94A3B8',
+                        border: `1px solid ${auctionPacePreset === 'standard' ? '#10B981' : '#334155'}`,
+                        borderRadius: 4,
+                        padding: '6px 4px',
+                        fontSize: 10,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      ⚡ Standard (90s)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuctionDurationSec(30);
+                        setAuctionPacePreset('blitz');
+                      }}
+                      style={{
+                        background: auctionPacePreset === 'blitz' ? '#1E293B' : '#0F172A',
+                        color: auctionPacePreset === 'blitz' ? '#F59E0B' : '#94A3B8',
+                        border: `1px solid ${auctionPacePreset === 'blitz' ? '#F59E0B' : '#334155'}`,
+                        borderRadius: 4,
+                        padding: '6px 4px',
+                        fontSize: 10,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      🔥 Rapid (30s)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAuctionPacePreset('custom')}
+                      style={{
+                        background: auctionPacePreset === 'custom' ? '#1E293B' : '#0F172A',
+                        color: auctionPacePreset === 'custom' ? '#A855F7' : '#94A3B8',
+                        border: `1px solid ${auctionPacePreset === 'custom' ? '#A855F7' : '#334155'}`,
+                        borderRadius: 4,
+                        padding: '6px 4px',
+                        fontSize: 10,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Custom
+                    </button>
+                  </div>
+
+                  {auctionPacePreset === 'custom' && (
+                    <input
+                      type="number"
+                      min="10"
+                      max="86400"
+                      value={auctionDurationSec}
+                      onChange={(e) => setAuctionDurationSec(Math.max(10, parseInt(e.target.value, 10) || 10))}
+                      placeholder="Custom Duration in Seconds"
+                      style={{
+                        width: '100%',
+                        background: '#090D1A',
+                        border: '1px solid #1E293B',
+                        borderRadius: 5,
+                        padding: '7px 10px',
+                        color: '#F8FAFC',
+                        fontSize: 12,
+                        marginBottom: 6,
+                      }}
+                    />
+                  )}
+
+                  {/* Live Simulation Preview Sentence */}
+                  <div
+                    style={{
+                      background: '#040711',
+                      border: '1px solid #1E293B',
+                      borderRadius: 5,
+                      padding: '8px 10px',
+                      fontSize: 11,
+                      color: '#94A3B8',
+                    }}
+                  >
+                    📉 <em>Price will decay by ~<strong>{dropRate} DKC</strong> every second and reach Floor Price (<strong>{auctionFloorPrice.toFixed(2)} DKC</strong>) in <strong>{auctionDurationSec}s</strong>.</em>
+                  </div>
+                </div>
+
+                {/* Submit Action */}
+                <button
+                  type="submit"
+                  disabled={auctionSubmitting || isCeilingViolated || isFloorInvalid || isInventoryInsufficient}
+                  style={{
+                    background: (auctionSubmitting || isCeilingViolated || isFloorInvalid || isInventoryInsufficient)
+                      ? '#1E293B'
+                      : 'linear-gradient(135deg, #00F0FF 0%, #0284C7 100%)',
+                    color: (auctionSubmitting || isCeilingViolated || isFloorInvalid || isInventoryInsufficient)
+                      ? '#64748B'
+                      : '#06080F',
+                    border: 'none',
+                    borderRadius: 5,
+                    padding: '12px 16px',
+                    fontWeight: 900,
+                    fontSize: 13,
+                    letterSpacing: '0.04em',
+                    cursor: (auctionSubmitting || isCeilingViolated || isFloorInvalid || isInventoryInsufficient)
+                      ? 'not-allowed'
+                      : 'pointer',
+                    boxShadow: (auctionSubmitting || isCeilingViolated || isFloorInvalid || isInventoryInsufficient)
+                      ? 'none'
+                      : '0 0 20px rgba(0, 240, 255, 0.4)',
+                    marginTop: 4,
+                  }}
+                >
+                  {auctionSubmitting
+                    ? 'LAUNCHING AUCTION...'
+                    : `🚀 LAUNCH AUCTION (${formatDKC(toMinorUnits(auctionStartPrice))} ➔ ${formatDKC(toMinorUnits(auctionFloorPrice))})`}
+                </button>
+              </form>
             </div>
-            <form onSubmit={handleCreateAuction} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div>
-                <label style={{ fontSize: 11, color: '#64748B', display: 'block', marginBottom: 3 }}>SYMBOL</label>
-                <select value={auctionSymbol} onChange={(e) => setAuctionSymbol(e.target.value)} style={{ width: '100%' }}>
-                  {instruments.map((i) => <option key={i.symbol} value={i.symbol}>{i.symbol}</option>)}
-                </select>
-              </div>
-              <div>
-                <label style={{ fontSize: 11, color: '#64748B', display: 'block', marginBottom: 3 }}>QUANTITY</label>
-                <input type="number" min="1" value={auctionQty} onChange={(e) => setAuctionQty(parseInt(e.target.value, 10))} style={{ width: '100%' }} />
-              </div>
-              <div>
-                <label style={{ fontSize: 11, color: '#64748B', display: 'block', marginBottom: 3 }}>START PRICE (DKC)</label>
-                <input type="number" value={auctionStartPrice} onChange={(e) => setAuctionStartPrice(parseFloat(e.target.value))} style={{ width: '100%' }} />
-              </div>
-              <div>
-                <label style={{ fontSize: 11, color: '#64748B', display: 'block', marginBottom: 3 }}>FLOOR PRICE (DKC)</label>
-                <input type="number" value={auctionFloorPrice} onChange={(e) => setAuctionFloorPrice(parseFloat(e.target.value))} style={{ width: '100%' }} />
-              </div>
-              <div>
-                <label style={{ fontSize: 11, color: '#64748B', display: 'block', marginBottom: 3 }}>DURATION (SECONDS)</label>
-                <input type="number" min="30" value={auctionDurationSec} onChange={(e) => setAuctionDurationSec(parseInt(e.target.value, 10))} style={{ width: '100%' }} />
-              </div>
-              <button
-                type="submit"
-                disabled={auctionSubmitting}
-                style={{
-                  background: '#00F0FF',
-                  color: '#06080F',
-                  border: 'none',
-                  borderRadius: 4,
-                  padding: 10,
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                  marginTop: 6,
-                }}
-              >
-                {auctionSubmitting ? 'CREATING...' : 'PUBLISH AUCTION'}
-              </button>
-            </form>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

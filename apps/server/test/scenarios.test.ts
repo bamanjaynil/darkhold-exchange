@@ -293,6 +293,51 @@ describe('Scenarios A-L End-to-End Integration Suite', () => {
     expect(buy1.success).toBe(true);
     expect(buy1.price).toBe(75000);
 
+    // Advance clock by 10s (decay to 70,000) and Carol buys final unit -> SOLD_OUT
+    clock.advance(10_000);
+    const buy2 = await core.dispatch<any>({
+      type: 'AUCTION_BUY',
+      auctionId,
+      buyerUserId: 'usr_carol',
+      qty: 1,
+      maxPrice: 71000,
+    });
+    expect(buy2.success).toBe(true);
+    expect(buy2.price).toBe(70000);
+    expect(buy2.auction.status).toBe('SOLD_OUT');
+    expect(buy2.auction.clearingPrice).toBe(70000);
+
+    // Advance clock past expiration
+    clock.advance(500_000);
+    const finalAuc = core.auctions.get(auctionId)!;
+    expect(finalAuc.status).toBe('SOLD_OUT');
+    expect(finalAuc.clearingPrice).toBe(70000);
+
+    // Test AUCTION_CANCEL and inventory reclamation
+    const cancelAucRes = await core.dispatch<any>({
+      type: 'AUCTION_CREATE',
+      data: {
+        symbol: 'MERCH-CLOAK',
+        sellerUserId: 'usr_bob',
+        qty: 1,
+        startPrice: 85000,
+        floorPrice: 60000,
+        durationSec: 120,
+      },
+    });
+    expect(cancelAucRes.success).toBe(true);
+    const bobHoldBefore = core.getHolding('usr_bob', 'MERCH-CLOAK').available;
+
+    const cancelRes = await core.dispatch<any>({
+      type: 'AUCTION_CANCEL',
+      auctionId: cancelAucRes.auction.id,
+      userId: 'usr_bob',
+      isAdmin: false,
+    });
+    expect(cancelRes.success).toBe(true);
+    expect(cancelRes.auction.status).toBe('CANCELLED');
+    expect(core.getHolding('usr_bob', 'MERCH-CLOAK').available).toBe(bobHoldBefore + 1);
+
     const rec = await runReconciliation(pool, core);
     expect(rec.balanced).toBe(true);
   });

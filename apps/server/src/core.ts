@@ -46,6 +46,8 @@ export type CoreAuction = {
   startsAt: number;
   endsAt: number;
   status: 'ACTIVE' | 'SOLD_OUT' | 'EXPIRED' | 'CANCELLED';
+  clearingPrice?: number;
+  endedAt?: number;
 };
 
 export type CoreEscrow = {
@@ -65,6 +67,7 @@ export type Command =
   | { type: 'ORDER_CANCEL'; orderId: string; symbol: string; userId: string; resolve: (val: any) => void; reject: (err: any) => void }
   | { type: 'AUCTION_CREATE'; data: any; resolve: (val: any) => void; reject: (err: any) => void }
   | { type: 'AUCTION_BUY'; auctionId: string; buyerUserId: string; qty: number; maxPrice: number; resolve: (val: any) => void; reject: (err: any) => void }
+  | { type: 'AUCTION_CANCEL'; auctionId: string; userId: string; isAdmin: boolean; resolve: (val: any) => void; reject: (err: any) => void }
   | { type: 'ESCROW_DELIVER'; escrowId: string; sellerUserId: string; resolve: (val: any) => void; reject: (err: any) => void }
   | { type: 'ESCROW_SWEEP'; resolve: (val: any) => void; reject: (err: any) => void };
 
@@ -983,8 +986,16 @@ export class ExchangeCore {
           currentSeq
         );
 
+        const durationSec = data.durationSec || 180;
+        const stepIntervalMs = data.stepIntervalMs || 1000;
+        let stepAmount = data.stepAmount;
+        if (!stepAmount || stepAmount <= 0) {
+          const totalSteps = Math.max(1, Math.floor((durationSec * 1000) / stepIntervalMs));
+          stepAmount = Math.max(1, Math.ceil((data.startPrice - data.floorPrice) / totalSteps));
+        }
+
         const startsAt = this.clock.now();
-        const endsAt = startsAt + data.durationSec * 1000;
+        const endsAt = startsAt + durationSec * 1000;
 
         const auction: CoreAuction = {
           id: aucId,
@@ -994,8 +1005,8 @@ export class ExchangeCore {
           qtyRemaining: data.qty,
           startPrice: data.startPrice,
           floorPrice: data.floorPrice,
-          stepAmount: data.stepAmount,
-          stepIntervalMs: data.stepIntervalMs,
+          stepAmount,
+          stepIntervalMs,
           startsAt,
           endsAt,
           status: 'ACTIVE',
@@ -1046,6 +1057,8 @@ export class ExchangeCore {
         const now = this.clock.now();
         if (now >= auc.endsAt) {
           auc.status = 'EXPIRED';
+          auc.clearingPrice = auc.floorPrice;
+          auc.endedAt = now;
           return resolve({ success: false, rejectedReason: 'AUCTION_EXPIRED' });
         }
 
@@ -1074,8 +1087,10 @@ export class ExchangeCore {
         buyerHold.available += qty;
 
         auc.qtyRemaining -= qty;
+        auc.clearingPrice = currentPrice;
         if (auc.qtyRemaining === 0) {
           auc.status = 'SOLD_OUT';
+          auc.endedAt = now;
         }
 
         const {
@@ -1117,6 +1132,71 @@ export class ExchangeCore {
         }
         this.persistence.enqueue(deltaBatch);
         if (!this.isSyncAck()) resolve({ success: true, price: currentPrice, qty, auction: auc });
+        break;
+      }
+
+      case 'AUCTION_CANCEL': {
+        const { auctionId, userId, isAdmin } = item;
+        const auc = this.auctions.get(auctionId);
+        if (!auc) {
+          return resolve({ success: false, rejectedReason: 'AUCTION_NOT_FOUND' });
+        }
+        if (auc.status !== 'ACTIVE') {
+          return resolve({ success: false, rejectedReason: 'AUCTION_NOT_ACTIVE' });
+        }
+        if (auc.sellerUserId !== userId && !isAdmin) {
+          return resolve({ success: false, rejectedReason: 'UNAUTHORIZED' });
+        }
+
+        const now = this.clock.now();
+        const elapsed = Math.max(0, now - auc.startsAt);
+        const steps = Math.floor(elapsed / auc.stepIntervalMs);
+        const currentPrice = Math.max(auc.floorPrice, auc.startPrice - steps * auc.stepAmount);
+
+        auc.status = 'CANCELLED';
+        auc.clearingPrice = currentPrice;
+        auc.endedAt = now;
+
+        const remaining = auc.qtyRemaining;
+        auc.qtyRemaining = 0;
+
+        // Release reserved inventory back to available
+        const sellerHold = this.getHolding(auc.sellerUserId, auc.symbol);
+        sellerHold.reserved -= remaining;
+        sellerHold.available += remaining;
+
+        const { journal, holdingDelta } = this.ledger.releaseAsset(
+          auc.sellerUserId,
+          auc.symbol,
+          remaining,
+          'AUCTION_CANCEL',
+          auc.id,
+          currentSeq
+        );
+
+        const deltaBatch: StateDeltaBatch = {
+          commandId: `auc_cancel_${auc.id}_${currentSeq}`,
+          seq: currentSeq,
+          journals: [journal],
+          balanceDeltas: [],
+          holdingDeltas: [holdingDelta],
+          upsertOrders: [],
+          newTrades: [],
+          upsertAuctions: [auc],
+          upsertEscrows: [],
+          auditEvents: [],
+          onCommit: () => {},
+          onRollback: (err) => {
+            console.error(`[CORE] Background persistence failed for auction cancel ${auc.id}:`, err.message);
+          },
+        };
+
+        if (this.isSyncAck()) {
+          deltaBatch.onCommit = () => resolve({ success: true, auction: auc, reclaimedQty: remaining });
+          deltaBatch.onRollback = (err) => reject(err);
+        }
+        this.persistence.enqueue(deltaBatch);
+        if (!this.isSyncAck()) resolve({ success: true, auction: auc, reclaimedQty: remaining });
         break;
       }
 

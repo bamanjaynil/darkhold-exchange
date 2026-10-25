@@ -55,9 +55,9 @@ export const CreateAuctionSchema = z.object({
   qty: z.number().int().positive(),
   startPrice: z.number().int().positive(),
   floorPrice: z.number().int().positive(),
-  stepAmount: z.number().int().positive(),
-  stepIntervalMs: z.number().int().min(100),
-  durationSec: z.number().int().min(1).max(86400),
+  stepAmount: z.number().int().positive().optional(),
+  stepIntervalMs: z.number().int().min(100).optional(),
+  durationSec: z.number().int().min(1).max(86400).optional(),
 }).refine((data) => data.floorPrice <= data.startPrice, {
   message: 'Floor price cannot exceed start price',
   path: ['floorPrice'],

@@ -193,11 +193,15 @@ async function hydrateFromDb(core: ExchangeCore, client: pg.PoolClient): Promise
     starts_at: Date;
     ends_at: Date;
     status: string;
+    clearing_price?: string | null;
+    ended_at?: Date | null;
   }>(`
-    SELECT a.id, i.symbol, a.seller_user_id, a.qty_total, a.qty_remaining, a.start_price, a.floor_price, a.step_amount, a.step_interval_ms, a.starts_at, a.ends_at, a.status
+    SELECT a.id, i.symbol, a.seller_user_id, a.qty_total, a.qty_remaining, a.start_price, a.floor_price, a.step_amount, a.step_interval_ms, a.starts_at, a.ends_at, a.status, a.clearing_price, a.ended_at
     FROM auctions a
     JOIN instruments i ON a.instrument_id = i.id
-    WHERE a.status = 'ACTIVE'
+    WHERE a.status IN ('ACTIVE', 'SOLD_OUT', 'CANCELLED')
+    ORDER BY a.starts_at DESC
+    LIMIT 100
   `);
 
   for (const a of aucRows) {
@@ -214,6 +218,8 @@ async function hydrateFromDb(core: ExchangeCore, client: pg.PoolClient): Promise
       startsAt: a.starts_at.getTime(),
       endsAt: a.ends_at.getTime(),
       status: a.status as any,
+      clearingPrice: a.clearing_price != null ? Number(a.clearing_price) : undefined,
+      endedAt: a.ended_at ? a.ended_at.getTime() : undefined,
     };
     core.auctions.set(a.id, auc);
   }

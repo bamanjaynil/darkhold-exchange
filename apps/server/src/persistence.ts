@@ -1156,12 +1156,14 @@ export class PersistenceEngine {
       for (const batch of toProcess) {
         for (const auc of batch.upsertAuctions) {
           await client.query(
-            `INSERT INTO auctions (id, instrument_id, seller_user_id, qty_total, qty_remaining, start_price, floor_price, step_amount, step_interval_ms, starts_at, ends_at, status)
-             SELECT $1, i.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+            `INSERT INTO auctions (id, instrument_id, seller_user_id, qty_total, qty_remaining, start_price, floor_price, step_amount, step_interval_ms, starts_at, ends_at, status, clearing_price, ended_at)
+             SELECT $1, i.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $13, $14
              FROM instruments i WHERE i.symbol = $12
              ON CONFLICT (id) DO UPDATE SET
                qty_remaining = EXCLUDED.qty_remaining,
                status = EXCLUDED.status,
+               clearing_price = COALESCE(EXCLUDED.clearing_price, auctions.clearing_price),
+               ended_at = COALESCE(EXCLUDED.ended_at, auctions.ended_at),
                updated_at = NOW()`,
             [
               auc.id,
@@ -1176,6 +1178,8 @@ export class PersistenceEngine {
               new Date(auc.endsAt),
               auc.status,
               auc.symbol,
+              auc.clearingPrice ?? null,
+              auc.endedAt ? new Date(auc.endedAt) : null,
             ]
           );
           this.queryCountAuctions++;
