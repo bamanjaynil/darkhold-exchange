@@ -77,6 +77,38 @@ export class MatchingEngine {
     return book?.getOrder(orderId);
   }
 
+  public getOpenOrdersForUser(userId: string): OrderNode[] {
+    const result: OrderNode[] = [];
+    for (const book of this.books.values()) {
+      for (const ord of book.getOpenOrders()) {
+        if (ord.userId === userId) {
+          result.push(ord);
+        }
+      }
+    }
+    return result;
+  }
+
+  public getTotalOpenOrderCount(): number {
+    let count = 0;
+    for (const book of this.books.values()) {
+      count += book.getOpenOrderCount();
+    }
+    return count;
+  }
+
+  public getAllOpenOrders(symbol?: string): OrderNode[] {
+    if (symbol) {
+      const book = this.getBook(symbol);
+      return book ? book.getOpenOrders() : [];
+    }
+    const result: OrderNode[] = [];
+    for (const book of this.books.values()) {
+      result.push(...book.getOpenOrders());
+    }
+    return result;
+  }
+
   public getL2Snapshot(symbol: string, depth?: number) {
     const book = this.getBook(symbol);
     if (!book) return null;

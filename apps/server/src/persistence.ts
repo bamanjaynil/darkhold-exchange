@@ -95,14 +95,18 @@ export const SQL_INSERT_POSTINGS = `INSERT INTO postings (journal_id, account_id
                  SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::varchar[], $4::bigint[], $5::bigint[])`;
 
 export const SQL_INSERT_ORDERS = `INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
-                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::varchar[], $9::bigint[], $10::int[], $11::int[], $12::varchar[])`;
+                 SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::varchar[], $9::bigint[], $10::int[], $11::int[], $12::varchar[])
+                 ON CONFLICT (id) DO UPDATE SET
+                   remaining_qty = EXCLUDED.remaining_qty,
+                   status = EXCLUDED.status,
+                   updated_at = NOW()`;
 
 export const SQL_UPDATE_ORDERS = `UPDATE orders AS o
                  SET remaining_qty = u.remaining_qty,
                      status = u.status,
                      updated_at = NOW()
                  FROM (SELECT * FROM UNNEST($1::varchar[], $2::int[], $3::varchar[]) AS t(id, remaining_qty, status)) AS u
-                 WHERE o.id = u.id AND (o.status <> u.status OR o.remaining_qty <> u.remaining_qty)`;
+                 WHERE o.id = u.id`;
 
 export const SQL_UPSERT_ORDERS = `INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
                  SELECT * FROM UNNEST($1::varchar[], $2::varchar[], $3::bigint[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::varchar[], $9::bigint[], $10::int[], $11::int[], $12::varchar[])
@@ -671,14 +675,9 @@ export class PersistenceEngine {
         }
         if (wasPersisted) {
           existingOrders.push(ord);
-          if (isTerminal) {
-            this.persistedOrderIds.delete(ord.id);
-          }
         } else {
           rawNewOrders.push(ord);
-          if (!isTerminal) {
-            this.persistedOrderIds.add(ord.id);
-          }
+          this.persistedOrderIds.add(ord.id);
         }
       }
 

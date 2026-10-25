@@ -31,6 +31,10 @@ export class WebSocketGateway {
       this.broadcastToChannel(event.channel, event.type, event.seq, event.data);
     });
 
+    this.core.setWsUserNotify((userId, data, seq) => {
+      this.sendToUser(userId, data, seq);
+    });
+
     // Heartbeat check interval
     setInterval(() => {
       const now = Date.now();

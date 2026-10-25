@@ -54,6 +54,20 @@ export class OrderBook {
     return this.ordersById.get(orderId);
   }
 
+  public getOpenOrders(): OrderNode[] {
+    return Array.from(this.ordersById.values());
+  }
+
+  public getOpenOrderCount(): number {
+    return this.ordersById.size;
+  }
+
+  public getSpread(): number | null {
+    const bestBid = this.getBestBid();
+    const bestAsk = this.getBestAsk();
+    return bestBid !== null && bestAsk !== null ? bestAsk - bestBid : null;
+  }
+
   /**
    * Submits an order into the order book.
    */

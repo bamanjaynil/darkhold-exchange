@@ -106,6 +106,9 @@ export class ExchangeCore {
   private commandQueue: Command[] = [];
   private isProcessing: boolean = false;
   private wsBroadcastCallback?: (event: { channel: string; type: string; data: any; seq: number }) => void;
+  private wsUserNotifyCallback?: (userId: string, data: any, seq: number) => void;
+  public readonly lastTradePrices: Map<string, number> = new Map();
+  public readonly volume24h: Map<string, number> = new Map();
 
   private maxCommandQueueDepth: number = 0;
   private commandExecutionTimesMs: number[] = [];
@@ -213,6 +216,39 @@ export class ExchangeCore {
 
   public setWsBroadcast(cb: (event: any) => void): void {
     this.wsBroadcastCallback = cb;
+  }
+
+  public setWsUserNotify(cb: (userId: string, data: any, seq: number) => void): void {
+    this.wsUserNotifyCallback = cb;
+  }
+
+  public notifyUserBalance(userId: string, seq: number): void {
+    if (!this.wsUserNotifyCallback) return;
+    const bal = this.getBalance(userId);
+    this.wsUserNotifyCallback(userId, {
+      balance: {
+        available: bal.available,
+        reserved: bal.reserved,
+        escrow: bal.escrow,
+        total: bal.available + bal.reserved + bal.escrow,
+      },
+    }, seq);
+  }
+
+  public getLastPrice(symbol: string): number | null {
+    return this.lastTradePrices.get(symbol) ?? null;
+  }
+
+  public getVolume24h(symbol: string): number {
+    return this.volume24h.get(symbol) ?? 0;
+  }
+
+  public getTotalOpenOrderCount(): number {
+    return this.engine.getTotalOpenOrderCount();
+  }
+
+  public getOpenOrdersForUser(userId: string) {
+    return this.engine.getOpenOrdersForUser(userId);
   }
 
   public getBalance(userId: string): UserBalance {
@@ -730,6 +766,22 @@ export class ExchangeCore {
           },
         };
 
+        if (result.trades.length > 0) {
+          for (let i = 0; i < result.trades.length; i++) {
+            const t = result.trades[i]!;
+            this.lastTradePrices.set(t.symbol, t.price);
+            this.volume24h.set(t.symbol, (this.volume24h.get(t.symbol) || 0) + t.qty);
+          }
+        }
+        if (this.wsUserNotifyCallback) {
+          this.notifyUserBalance(cmd.userId, currentSeq);
+          for (let i = 0; i < result.trades.length; i++) {
+            const t = result.trades[i]!;
+            if (t.buyerUserId !== cmd.userId) this.notifyUserBalance(t.buyerUserId, currentSeq);
+            if (t.sellerUserId !== cmd.userId) this.notifyUserBalance(t.sellerUserId, currentSeq);
+          }
+        }
+
         if (this.isSyncAck()) {
           deltaBatch.onCommit = () => {
             this.broadcastMarketUpdates(cmd.symbol, currentSeq, result.trades);
@@ -838,6 +890,10 @@ export class ExchangeCore {
           },
         };
 
+        if (this.wsUserNotifyCallback) {
+          this.notifyUserBalance(userId, currentSeq);
+        }
+
         if (this.isSyncAck()) {
           deltaBatch.onCommit = () => {
             this.broadcastMarketUpdates(symbol, currentSeq, []);
@@ -848,7 +904,9 @@ export class ExchangeCore {
         } else {
           this.broadcastMarketUpdates(symbol, currentSeq, []);
           this.persistence.enqueue(deltaBatch);
-          resolve(cancelRes);
+          this.persistence.flush()
+            .then(() => resolve(cancelRes))
+            .catch((err) => reject(err));
         }
         break;
       }

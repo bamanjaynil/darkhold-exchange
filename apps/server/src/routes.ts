@@ -372,18 +372,29 @@ export function registerRoutes(
     });
   });
 
-  server.delete('/api/orders/:id', { preHandler: requireAuth }, async (req, reply) => {
+  const handleCancelOrder = async (req: FastifyRequest, reply: FastifyReply) => {
     const { id } = req.params as { id: string };
-    const { symbol } = req.query as { symbol: string };
+    const query = req.query as { symbol?: string };
+    const body = (typeof req.body === 'object' && req.body !== null) ? (req.body as { symbol?: string }) : {};
+    let targetSymbol = query.symbol || body.symbol;
 
-    if (!symbol) {
+    if (!targetSymbol) {
+      for (const inst of core.instruments.values()) {
+        if (core.engine.getOrder(inst.symbol, id)) {
+          targetSymbol = inst.symbol;
+          break;
+        }
+      }
+    }
+
+    if (!targetSymbol) {
       return reply.status(400).send({ error: 'SYMBOL_REQUIRED' });
     }
 
     const result = await core.dispatch<any>({
       type: 'ORDER_CANCEL',
       orderId: id,
-      symbol,
+      symbol: targetSymbol,
       userId: req.sessionUser!.id,
     });
 
@@ -393,10 +404,14 @@ export function registerRoutes(
     }
 
     reply.send(result);
-  });
+  };
 
-  server.get('/api/orders/my', { preHandler: requireAuth }, async (req, reply) => {
+  server.delete('/api/orders/:id', { preHandler: requireAuth }, handleCancelOrder);
+  server.post('/api/orders/:id/cancel', { preHandler: requireAuth }, handleCancelOrder);
+
+  const getMyOrdersHandler = async (req: FastifyRequest, reply: FastifyReply) => {
     await core.persistence.flush();
+    const userId = req.sessionUser!.id;
     const { rows } = await core.persistence['pool'].query(
       `SELECT o.id, o.client_order_id, o.side, o.type, o.tif, o.price, o.qty, o.remaining_qty, o.status, o.created_at, i.symbol
        FROM orders o
@@ -404,15 +419,109 @@ export function registerRoutes(
        WHERE o.user_id = $1
        ORDER BY o.seq DESC
        LIMIT 100`,
-      [req.sessionUser!.id]
+      [userId]
     );
-    const mapped = rows.map((r: any) => ({
-      ...r,
-      price: Number(r.price),
-      qty: Number(r.qty),
-      remaining_qty: Number(r.remaining_qty),
-    }));
+
+    const openInRam = core.getOpenOrdersForUser(userId);
+    const ramOpenMap = new Map<string, any>();
+    for (let i = 0; i < openInRam.length; i++) {
+      const ord = openInRam[i]!;
+      ramOpenMap.set(ord.id, ord);
+    }
+
+    const seenIds = new Set<string>();
+    const mapped = rows.map((r: any) => {
+      seenIds.add(r.id);
+      let status = r.status;
+      let remainingQty = Number(r.remaining_qty);
+      const live = ramOpenMap.get(r.id);
+
+      if (status === 'OPEN') {
+        if (!live) {
+          status = 'CANCELLED';
+        } else {
+          remainingQty = live.remainingQty;
+        }
+      }
+
+      return {
+        ...r,
+        price: Number(r.price),
+        qty: Number(r.qty),
+        remaining_qty: remainingQty,
+        status,
+      };
+    });
+
+    for (const [id, ord] of ramOpenMap.entries()) {
+      if (!seenIds.has(id)) {
+        mapped.unshift({
+          id: ord.id,
+          client_order_id: ord.clientOrderId,
+          side: ord.side,
+          type: ord.type,
+          tif: ord.tif,
+          price: ord.price,
+          qty: ord.qty,
+          remaining_qty: ord.remainingQty,
+          status: 'OPEN',
+          created_at: new Date().toISOString(),
+          symbol: ord.symbol,
+        });
+      }
+    }
+
     reply.send(mapped);
+  };
+
+  server.get('/api/orders/my', { preHandler: requireAuth }, getMyOrdersHandler);
+  server.get('/api/orders', { preHandler: requireAuth }, getMyOrdersHandler);
+
+  server.get('/api/balances', { preHandler: requireAuth }, async (req, reply) => {
+    const bal = core.getBalance(req.sessionUser!.id);
+    reply.send(bal);
+  });
+
+  server.get('/api/me', async (req, reply) => {
+    if (!req.sessionUser) {
+      return reply.status(401).send({ error: 'UNAUTHORIZED' });
+    }
+    const bal = core.getBalance(req.sessionUser.id);
+    reply.send({
+      user: req.sessionUser,
+      csrfToken: req.cookies['dk_csrf'] || '',
+      balance: {
+        available: bal.available,
+        reserved: bal.reserved,
+        escrow: bal.escrow,
+        total: bal.available + bal.reserved + bal.escrow,
+      },
+    });
+  });
+
+  server.get('/api/market/stats', async (_req, reply) => {
+    const list = Array.from(core.instruments.values()).filter((i) => !i.isBenchmark);
+    const symbolsStats = list.map((inst) => {
+      const book = core.engine.getBook(inst.symbol);
+      return {
+        symbol: inst.symbol,
+        faceValue: inst.faceValue,
+        collarBps: inst.collarBps,
+        lastPrice: core.getLastPrice(inst.symbol) ?? inst.faceValue,
+        bestBid: book?.getBestBid() ?? null,
+        bestAsk: book?.getBestAsk() ?? null,
+        spread: book?.getSpread() ?? null,
+        openOrders: book?.getOpenOrderCount() ?? 0,
+        volume24h: core.getVolume24h(inst.symbol),
+      };
+    });
+
+    reply.send({
+      seq: core.seq,
+      activeOrders: core.getTotalOpenOrderCount(),
+      clock: core.clock.now(),
+      symbols: symbolsStats,
+    });
   });
 
   // --- 4. DUTCH AUCTIONS ---
