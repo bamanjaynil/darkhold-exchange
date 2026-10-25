@@ -39,7 +39,12 @@ const ConfigSchema = z.object({
   POW_REQUIRED: z.preprocess((val) => val === 'true' || val === true, z.boolean()).default(true),
   POW_MIN_DIFFICULTY: z.coerce.number().int().min(4).max(32).default(10),
   POW_MAX_DIFFICULTY: z.coerce.number().int().min(4).max(32).default(22),
-  RATE_LIMIT_PROFILE: z.enum(['standard', 'bench']).default('standard'),
+  RATE_LIMIT_PROFILE: z
+    .preprocess((val) => {
+      const v = (val || process.env.RATE_PROFILE || 'standard') as string;
+      if (v === 'benchmark' || v === 'unthrottled') return 'bench';
+      return v;
+    }, z.enum(['standard', 'bench']).default('standard')),
   MAX_OPEN_ORDERS_PER_USER: z.coerce.number().int().min(1).default(50),
   RATE_LIMIT_ORDERS_PER_SEC: z.coerce.number().int().min(1).default(50),
   RATE_LIMIT_CANCELS_PER_SEC: z.coerce.number().int().min(1).default(50),

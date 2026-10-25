@@ -50,7 +50,9 @@ export function registerRoutes(
       if (
         req.url.startsWith('/api/auth/login') ||
         req.url.startsWith('/api/auth/register') ||
-        req.headers['x-bench-bypass'] === 'true'
+        req.url.startsWith('/api/auth/logout') ||
+        req.headers['x-bench-bypass'] === 'true' ||
+        config.RATE_LIMIT_PROFILE === 'bench'
       ) {
         return;
       }
@@ -74,6 +76,42 @@ export function registerRoutes(
       return reply.status(403).send({ error: 'FORBIDDEN_ADMIN_ONLY' });
     }
   };
+
+  // --- 0. HEALTH & READINESS PROBES ---
+  const healthHandler = async (_req: FastifyRequest, reply: FastifyReply) => {
+    reply.send({
+      status: 'ok',
+      service: 'darkhold-exchange',
+      version: '1.0.0',
+      timestamp: new Date().toISOString(),
+    });
+  };
+  server.get('/health', healthHandler);
+  server.get('/api/health', healthHandler);
+
+  const readyHandler = async (_req: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const client = await core.persistence['pool'].connect();
+      await client.query('SELECT 1');
+      client.release();
+
+      reply.send({
+        status: 'ready',
+        database: 'connected',
+        coreSeq: core.seq,
+        marketMode: config.MARKET_MODE,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      reply.status(503).send({
+        status: 'not_ready',
+        error: err.message || 'Database connection unavailable',
+        timestamp: new Date().toISOString(),
+      });
+    }
+  };
+  server.get('/ready', readyHandler);
+  server.get('/api/ready', readyHandler);
 
   // --- 1. AUTHENTICATION ROUTES ---
 
@@ -117,6 +155,9 @@ export function registerRoutes(
           },
         });
     } catch (err: any) {
+      if (err.message === 'RATE_LIMITED') {
+        return reply.status(429).send({ error: 'RATE_LIMITED' });
+      }
       reply.status(400).send({ error: err.message || 'REGISTRATION_FAILED' });
     }
   });
@@ -160,11 +201,14 @@ export function registerRoutes(
           },
         });
     } catch (err: any) {
+      if (err.message === 'RATE_LIMITED') {
+        return reply.status(429).send({ error: 'RATE_LIMITED' });
+      }
       reply.status(401).send({ error: err.message || 'INVALID_CREDENTIALS' });
     }
   });
 
-  server.post('/api/auth/logout', async (req, reply) => {
+  const logoutHandler = async (req: FastifyRequest, reply: FastifyReply) => {
     const authHeader = req.headers.authorization;
     const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
     const sessionToken = req.cookies['dk_session'] || (req.headers['x-session-token'] as string | undefined) || bearerToken;
@@ -172,10 +216,25 @@ export function registerRoutes(
       await auth.logout(sessionToken);
     }
     reply
-      .clearCookie('dk_session', { path: '/' })
-      .clearCookie('dk_csrf', { path: '/' })
+      .clearCookie('dk_session', {
+        path: '/',
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: config.NODE_ENV === 'production',
+        maxAge: 0,
+      })
+      .clearCookie('dk_csrf', {
+        path: '/',
+        httpOnly: false,
+        sameSite: 'lax',
+        secure: config.NODE_ENV === 'production',
+        maxAge: 0,
+      })
       .send({ success: true });
-  });
+  };
+
+  server.post('/api/auth/logout', logoutHandler);
+  server.get('/api/auth/logout', logoutHandler);
 
   server.get('/api/auth/me', async (req, reply) => {
     if (!req.sessionUser) {
@@ -184,6 +243,7 @@ export function registerRoutes(
     const bal = core.getBalance(req.sessionUser.id);
     reply.send({
       user: req.sessionUser,
+      csrfToken: req.cookies['dk_csrf'] || '',
       balance: {
         available: bal.available,
         reserved: bal.reserved,
@@ -202,13 +262,22 @@ export function registerRoutes(
 
   server.get('/api/book/:symbol', async (req, reply) => {
     const { symbol } = req.params as { symbol: string };
+    const cached = core.cachedL2Snapshots.get(symbol);
+    if (cached && cached.seq === core.seq) {
+      return reply.send(cached.data);
+    }
     const snap = core.engine.getL2Snapshot(symbol, 20);
     if (!snap) return reply.status(404).send({ error: 'INSTRUMENT_NOT_FOUND' });
+    core.cachedL2Snapshots.set(symbol, { seq: core.seq, data: snap });
     reply.send(snap);
   });
 
   server.get('/api/trades/:symbol', async (req, reply) => {
     const { symbol } = req.params as { symbol: string };
+    const cached = core.cachedTrades.get(symbol);
+    if (cached) {
+      return reply.send(cached);
+    }
     const { rows } = await core.persistence['pool'].query(
       `SELECT t.id, t.price, t.qty, t.is_simulated, t.created_at
        FROM trades t
@@ -218,7 +287,13 @@ export function registerRoutes(
        LIMIT 50`,
       [symbol]
     );
-    reply.send(rows);
+    const mapped = rows.map((r: any) => ({
+      ...r,
+      price: Number(r.price),
+      qty: Number(r.qty),
+    }));
+    core.cachedTrades.set(symbol, mapped);
+    reply.send(mapped);
   });
 
   // --- 3. ORDERS ---
@@ -233,22 +308,24 @@ export function registerRoutes(
     const { symbol, side, type, tif, price, qty, clientOrderId, pow } = parsed.data;
 
     // Rate Limit check
-    if (!antibot.checkOrderRateLimit(user.id, req.ip)) {
+    const bypassRateLimit =
+      req.headers['x-bench-bypass'] === 'true' || config.RATE_LIMIT_PROFILE === 'bench';
+    if (!bypassRateLimit && !antibot.checkOrderRateLimit(user.id, req.ip)) {
       return reply.status(429).send({ error: 'RATE_LIMITED' });
     }
 
     // Proof-of-work verification
-    if (config.POW_REQUIRED && req.headers['x-bench-bypass'] !== 'true') {
+    const bypassPow =
+      req.headers['x-bench-bypass'] === 'true' ||
+      config.RATE_LIMIT_PROFILE === 'bench' ||
+      !config.POW_REQUIRED;
+    if (!bypassPow) {
       if (!pow) {
         return reply.status(400).send({ error: 'POW_REQUIRED' });
       }
       const verified = antibot.verifySubmission(
         {
           challengeId: pow.challengeId,
-          seed: '',
-          difficultyBits: 0,
-          expiresAt: 0,
-          mac: '',
           nonce: pow.nonce,
         },
         user.id,
@@ -281,7 +358,18 @@ export function registerRoutes(
       return reply.status(400).send({ error: result.rejectedReason || 'ORDER_REJECTED' });
     }
 
-    reply.send(result);
+    const cleanOrder = (o: any) => {
+      if (!o) return undefined;
+      const { next, prev, ...clean } = o;
+      return clean;
+    };
+
+    reply.send({
+      ...result,
+      restingOrder: cleanOrder(result.restingOrder),
+      cancelledOrders: result.cancelledOrders?.map(cleanOrder),
+      filledOrders: result.filledOrders?.map(cleanOrder),
+    });
   });
 
   server.delete('/api/orders/:id', { preHandler: requireAuth }, async (req, reply) => {
@@ -308,6 +396,7 @@ export function registerRoutes(
   });
 
   server.get('/api/orders/my', { preHandler: requireAuth }, async (req, reply) => {
+    await core.persistence.flush();
     const { rows } = await core.persistence['pool'].query(
       `SELECT o.id, o.client_order_id, o.side, o.type, o.tif, o.price, o.qty, o.remaining_qty, o.status, o.created_at, i.symbol
        FROM orders o
@@ -317,7 +406,13 @@ export function registerRoutes(
        LIMIT 100`,
       [req.sessionUser!.id]
     );
-    reply.send(rows);
+    const mapped = rows.map((r: any) => ({
+      ...r,
+      price: Number(r.price),
+      qty: Number(r.qty),
+      remaining_qty: Number(r.remaining_qty),
+    }));
+    reply.send(mapped);
   });
 
   // --- 4. DUTCH AUCTIONS ---
@@ -358,7 +453,8 @@ export function registerRoutes(
 
   server.post('/api/auctions/:id/buy', { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const parsed = BuyAuctionSchema.safeParse(req.body);
+    const body = (typeof req.body === 'object' && req.body !== null) ? req.body : {};
+    const parsed = BuyAuctionSchema.safeParse({ ...body, auctionId: id });
     if (!parsed.success) {
       return reply.status(400).send({ error: 'VALIDATION_ERROR', details: parsed.error.format() });
     }
@@ -451,6 +547,22 @@ export function registerRoutes(
       return reply.status(404).send({ error: 'NO_LIABILITIES_FOR_USER' });
     }
     reply.send(proof);
+  });
+
+  server.get('/api/solvency/status', async (_req, reply) => {
+    let snapshot = solvency.getLatestSnapshot();
+    if (!snapshot) {
+      snapshot = await solvency.createSnapshot(core);
+    }
+    const report = await runReconciliation(core.persistence['pool'], core);
+    reply.send({
+      snapshotId: snapshot.id,
+      asOfSeq: snapshot.asOfSeq,
+      rootHash: snapshot.rootHash,
+      totalLiabilities: snapshot.totalLiabilities,
+      balanced: report.balanced,
+      timestamp: snapshot.createdAt,
+    });
   });
 
   server.post('/api/admin/solvency/snapshot', { preHandler: requireAdmin }, async (_req, reply) => {

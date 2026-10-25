@@ -19,7 +19,7 @@ import { Clock } from './clock.js';
 import { calculateCollarCeiling } from '@darkhold/shared';
 import { AppendOnlyJournal } from './aol.js';
 
-const EMPTY_ARRAY: any[] = Object.freeze([]);
+const EMPTY_ARRAY: any[] = Object.freeze([]) as any;
 
 export type UserBalance = {
   available: number;
@@ -81,6 +81,12 @@ export class ExchangeCore {
   public readonly holdings: Map<string, UserHolding> = new Map(); // Key: `${userId}:${symbol}`
   public readonly auctions: Map<string, CoreAuction> = new Map();
   public readonly escrows: Map<string, CoreEscrow> = new Map();
+
+  public readonly cachedL2Snapshots: Map<string, { seq: number; data: any }> = new Map();
+  public readonly cachedTrades: Map<string, Array<{ id: string; price: number; qty: number; is_simulated: boolean; created_at: string }>> = new Map();
+  private pendingBroadcastSymbols: Set<string> = new Set();
+  private pendingBroadcastTrades: Map<string, MatchedTrade[]> = new Map();
+  private broadcastScheduled: boolean = false;
 
   private activeDeltaBatch: StateDeltaBatch | null = null;
   private activeHoldingDelta?: HoldingDelta;
@@ -181,7 +187,7 @@ export class ExchangeCore {
     buyer.available = origBuyerAvail;
     buyer.reserved = origBuyerReserved;
 
-    this.engine = new MatchingEngine(Array.from(this.instruments.values()));
+    (this as any).engine = new MatchingEngine(Array.from(this.instruments.values()));
     this.activeDeltaBatch = null;
     this.activeHoldingDelta = undefined;
     this.activePostings = undefined;
@@ -331,12 +337,12 @@ export class ExchangeCore {
   ): void {
     this.seq++;
     const currentSeq = this.seq;
+    const resolve = directResolve || item.resolve || (() => {});
+    const reject = directReject || item.reject || (() => {});
 
     switch (item.type) {
       case 'ORDER_SUBMIT': {
         const cmd = item.cmd;
-        const resolve = directResolve || item.resolve;
-        const reject = directReject || item.reject;
         cmd.seq = currentSeq;
 
         const inst = (cmd.symbol === this.lastSymbol && this.lastInstrument)
@@ -748,7 +754,7 @@ export class ExchangeCore {
       }
 
       case 'ORDER_CANCEL': {
-        const { orderId, symbol, userId, resolve, reject } = item;
+        const { orderId, symbol, userId } = item;
         const ord = this.engine.getOrder(symbol, orderId);
         if (!ord) {
           return resolve({ success: false, rejectedReason: 'ORDER_NOT_FOUND', seq: currentSeq });
@@ -848,7 +854,7 @@ export class ExchangeCore {
       }
 
       case 'AUCTION_CREATE': {
-        const { data, resolve, reject } = item;
+        const { data } = item;
         const inst = this.instruments.get(data.symbol);
         if (!inst) {
           return resolve({ success: false, rejectedReason: 'INSTRUMENT_NOT_FOUND' });
@@ -924,7 +930,7 @@ export class ExchangeCore {
       }
 
       case 'AUCTION_BUY': {
-        const { auctionId, buyerUserId, qty, maxPrice, resolve, reject } = item;
+        const { auctionId, buyerUserId, qty, maxPrice } = item;
         const auc = this.auctions.get(auctionId);
         if (!auc || auc.status !== 'ACTIVE') {
           return resolve({ success: false, rejectedReason: 'AUCTION_NOT_ACTIVE' });
@@ -1015,7 +1021,7 @@ export class ExchangeCore {
       }
 
       case 'ESCROW_DELIVER': {
-        const { escrowId, sellerUserId, resolve, reject } = item;
+        const { escrowId, sellerUserId } = item;
         const esc = this.escrows.get(escrowId);
         if (!esc || esc.status !== 'LOCKED') {
           return resolve({ success: false, rejectedReason: 'ESCROW_NOT_LOCKED' });
@@ -1080,7 +1086,6 @@ export class ExchangeCore {
       }
 
       case 'ESCROW_SWEEP': {
-        const { resolve } = item;
         const now = this.clock.now();
         let sweptCount = 0;
 
@@ -1132,33 +1137,98 @@ export class ExchangeCore {
   }
 
   private broadcastMarketUpdates(symbol: string, seq: number, trades: MatchedTrade[]): void {
-    if (!this.wsBroadcastCallback) return;
+    // Invalidate cached L2 snapshot on any book modification
+    this.cachedL2Snapshots.delete(symbol);
 
-    const snap = this.engine.getL2Snapshot(symbol, 20);
-    if (snap) {
-      this.wsBroadcastCallback({
-        channel: `book:${symbol}`,
-        type: 'delta',
-        seq,
-        data: snap,
-      });
-    }
-
-    for (const t of trades) {
-      this.wsBroadcastCallback({
-        channel: `trades:${symbol}`,
-        type: 'delta',
-        seq,
-        data: {
+    // Keep cached trades in sync in RAM
+    if (trades.length > 0) {
+      let list = this.cachedTrades.get(symbol);
+      if (!list) {
+        list = [];
+        this.cachedTrades.set(symbol, list);
+      }
+      const nowStr = new Date().toISOString();
+      for (let i = 0; i < trades.length; i++) {
+        const t = trades[i]!;
+        list.unshift({
           id: t.id,
-          symbol: t.symbol,
           price: t.price,
           qty: t.qty,
-          side: t.takerSide,
-          timestamp: this.clock.now(),
-          isSimulated: false,
-        },
+          is_simulated: false,
+          created_at: nowStr,
+        });
+      }
+      if (list.length > 50) list.length = 50;
+    }
+
+    if (!this.wsBroadcastCallback) return;
+
+    this.pendingBroadcastSymbols.add(symbol);
+    if (trades.length > 0) {
+      let pTrades = this.pendingBroadcastTrades.get(symbol);
+      if (!pTrades) {
+        pTrades = [];
+        this.pendingBroadcastTrades.set(symbol, pTrades);
+      }
+      for (let i = 0; i < trades.length; i++) {
+        pTrades.push(trades[i]!);
+      }
+      if (pTrades.length > 50) {
+        pTrades.splice(0, pTrades.length - 50);
+      }
+    }
+
+    if (!this.broadcastScheduled) {
+      this.broadcastScheduled = true;
+      setImmediate(() => {
+        this.broadcastScheduled = false;
+        this.flushBroadcasts();
       });
     }
+  }
+
+  private flushBroadcasts(): void {
+    if (!this.wsBroadcastCallback) {
+      this.pendingBroadcastSymbols.clear();
+      this.pendingBroadcastTrades.clear();
+      return;
+    }
+
+    for (const symbol of this.pendingBroadcastSymbols) {
+      const snap = this.engine.getL2Snapshot(symbol, 20);
+      if (snap) {
+        this.wsBroadcastCallback({
+          channel: `book:${symbol}`,
+          type: 'delta',
+          seq: this.seq,
+          data: snap,
+        });
+      }
+
+      const trades = this.pendingBroadcastTrades.get(symbol);
+      if (trades && trades.length > 0) {
+        const now = this.clock.now();
+        for (let i = 0; i < trades.length; i++) {
+          const t = trades[i]!;
+          this.wsBroadcastCallback({
+            channel: `trades:${symbol}`,
+            type: 'delta',
+            seq: this.seq,
+            data: {
+              id: t.id,
+              symbol: t.symbol,
+              price: t.price,
+              qty: t.qty,
+              side: t.takerSide,
+              timestamp: now,
+              isSimulated: false,
+            },
+          });
+        }
+      }
+    }
+
+    this.pendingBroadcastSymbols.clear();
+    this.pendingBroadcastTrades.clear();
   }
 }

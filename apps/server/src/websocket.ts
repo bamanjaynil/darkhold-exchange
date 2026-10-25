@@ -153,7 +153,25 @@ export class WebSocketGateway {
     }
   }
 
+  public hasSubscribers(channel: string): boolean {
+    if (this.connections.size === 0) return false;
+    for (const conn of this.connections) {
+      if (conn.subscriptions.has(channel)) return true;
+    }
+    return false;
+  }
+
   public broadcastToChannel(channel: string, type: 'snapshot' | 'delta', seq: number, data: any): void {
+    if (this.connections.size === 0) return;
+    let hasSub = false;
+    for (const conn of this.connections) {
+      if (conn.subscriptions.has(channel)) {
+        hasSub = true;
+        break;
+      }
+    }
+    if (!hasSub) return;
+
     const msg: WsServerMessage = {
       v: 1,
       type,

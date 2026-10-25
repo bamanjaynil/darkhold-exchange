@@ -27,7 +27,14 @@
     "bench:engine": "tsx bench/engine-bench.ts",
     "bench:core": "tsx bench/core-bench.ts",
     "bench:http": "node bench/http-bench.mjs",
-    "bench:report": "tsx bench/report.ts"
+    "bench:k6": "k6 run bench/k6-load.js",
+    "bench:locust": "locust -f bench/locustfile.py --headless -u 50 -r 10 --run-time 15s --host http://localhost:3000",
+    "bench:locust:ui": "locust -f bench/locustfile.py --host http://localhost:3000",
+    "demo:sim": "tsx bench/demo-simulator.ts",
+    "bench:report": "tsx bench/report.ts",
+    "bench:load:market": "k6 run --summary-export=results/k6-market.json tests/load/readiness-market-load.js",
+    "bench:load:auth": "k6 run --summary-export=results/k6-auth.json tests/load/auth-and-wallet-load.js",
+    "bench:load": "pnpm run bench:load:market && pnpm run bench:load:auth"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

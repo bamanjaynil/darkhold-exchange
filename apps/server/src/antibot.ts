@@ -23,6 +23,7 @@ export class AntiBotManager {
   private secret: string;
   private pool: pg.Pool;
   private clientStats = new Map<string, ClientStats>();
+  private activeChallenges = new Map<string, PoWChallenge>();
   private usedChallenges = new Set<string>(); // Bounded replay cache
   private orderRateBuckets = new Map<string, { tokens: number; lastRefill: number }>();
 
@@ -30,8 +31,14 @@ export class AntiBotManager {
     this.pool = pool;
     this.secret = secret;
 
-    // Prune replay cache every 5 minutes
+    // Prune expired challenges and replay cache every 5 minutes
     setInterval(() => {
+      const now = Math.floor(Date.now() / 1000);
+      for (const [id, chal] of this.activeChallenges.entries()) {
+        if (now > chal.expiresAt) {
+          this.activeChallenges.delete(id);
+        }
+      }
       this.usedChallenges.clear();
     }, 300_000);
   }
@@ -68,20 +75,32 @@ export class AntiBotManager {
       expiresAt
     );
 
-    return { challengeId, seed, difficultyBits, expiresAt, mac };
+    const challenge: PoWChallenge = { challengeId, seed, difficultyBits, expiresAt, mac };
+    this.activeChallenges.set(challengeId, challenge);
+    return challenge;
   }
 
   public verifySubmission(
-    solution: PoWSolution,
+    submission: { challengeId: string; nonce: string },
     userId: string,
     ip: string
   ): { valid: boolean; reason?: string } {
-    if (this.usedChallenges.has(solution.challengeId)) {
+    if (this.usedChallenges.has(submission.challengeId)) {
       void this.logAudit('POW_REPLAY', 'POW_REPLAY_DETECTED', userId, ip);
       return { valid: false, reason: 'POW_REPLAY' };
     }
 
+    const chal = this.activeChallenges.get(submission.challengeId);
+    if (!chal) {
+      void this.logAudit('POW_FAILURE', 'POW_CHALLENGE_NOT_FOUND', userId, ip);
+      return { valid: false, reason: 'POW_CHALLENGE_NOT_FOUND' };
+    }
+
     const now = Math.floor(Date.now() / 1000);
+    const solution: PoWSolution = {
+      ...chal,
+      nonce: submission.nonce,
+    };
     const result = verifyPoWSolution(solution, this.secret, now);
 
     if (!result.valid) {
@@ -89,12 +108,14 @@ export class AntiBotManager {
       return result;
     }
 
-    this.usedChallenges.add(solution.challengeId);
+    this.activeChallenges.delete(submission.challengeId);
+    this.usedChallenges.add(submission.challengeId);
     return { valid: true };
   }
 
   public checkOrderRateLimit(userId: string, ip: string): boolean {
-    const limit = config.RATE_LIMIT_PROFILE === 'bench' ? 10_000 : config.RATE_LIMIT_ORDERS_PER_SEC;
+    if (config.RATE_LIMIT_PROFILE === 'bench') return true;
+    const limit = config.RATE_LIMIT_ORDERS_PER_SEC;
     const key = `${userId}:${ip}`;
     const now = Date.now();
 

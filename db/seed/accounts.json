@@ -5,13 +5,13 @@
     "role": "admin",
     "isDemo": false,
     "isSimulated": false,
-    "initialDkc": 5000000,
+    "initialDkc": 1000000000,
     "initialInventory": {
-      "FEST-GA": 100,
-      "FEST-VIP": 50,
-      "RELIC-AGAMOTTO": 20,
-      "MERCH-CLOAK": 200,
-      "BENCH-X": 10000
+      "FEST-GA": 1000,
+      "FEST-VIP": 500,
+      "RELIC-AGAMOTTO": 200,
+      "MERCH-CLOAK": 2000,
+      "BENCH-X": 100000
     }
   },
   {
@@ -23,7 +23,8 @@
     "initialDkc": 1000000,
     "initialInventory": {
       "FEST-GA": 10,
-      "RELIC-AGAMOTTO": 2
+      "RELIC-AGAMOTTO": 2,
+      "BENCH-X": 100000
     }
   },
   {
@@ -32,10 +33,12 @@
     "role": "user",
     "isDemo": true,
     "isSimulated": false,
-    "initialDkc": 1500000,
+    "initialDkc": 1000000000,
     "initialInventory": {
-      "FEST-VIP": 5,
-      "MERCH-CLOAK": 10
+      "FEST-VIP": 500,
+      "MERCH-CLOAK": 1000,
+      "FEST-GA": 1000,
+      "BENCH-X": 100000
     }
   },
   {
@@ -44,9 +47,10 @@
     "role": "user",
     "isDemo": true,
     "isSimulated": false,
-    "initialDkc": 2000000,
+    "initialDkc": 1000000000,
     "initialInventory": {
-      "FEST-GA": 5
+      "FEST-GA": 1000,
+      "BENCH-X": 100000
     }
   },
   {
@@ -55,9 +59,9 @@
     "role": "user",
     "isDemo": false,
     "isSimulated": true,
-    "initialDkc": 50000000,
+    "initialDkc": 1000000000,
     "initialInventory": {
-      "BENCH-X": 50000
+      "BENCH-X": 100000
     }
   }
 ]

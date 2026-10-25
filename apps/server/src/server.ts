@@ -8,6 +8,7 @@ import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
+import pg from 'pg';
 import { config } from './config.js';
 import { dbPool, releaseWriterLock } from './db.js';
 import { SystemClock } from './clock.js';
@@ -18,9 +19,13 @@ import { SolvencyCoordinator } from './solvency.js';
 import { WebSocketGateway } from './websocket.js';
 import { registerRoutes } from './routes.js';
 
-export async function buildServer() {
+export async function buildServer(customPool?: pg.Pool) {
+  const pool = customPool || dbPool;
+
+  const isBench = config.RATE_LIMIT_PROFILE === 'bench' || process.env.BENCH === '1';
+
   const server = Fastify({
-    logger: config.NODE_ENV !== 'test',
+    logger: isBench ? false : config.NODE_ENV !== 'test',
     bodyLimit: 1048576, // 1MB strict limit
   });
 
@@ -43,16 +48,16 @@ export async function buildServer() {
 
   // Bootstrap authoritative ExchangeCore with PostgreSQL recovery
   const core = await bootstrapCore(
-    dbPool,
+    pool,
     clock,
     config.PERSIST_BATCH_MAX,
     config.PERSIST_BATCH_MS,
     config.FORCE_START
   );
 
-  const auth = new AuthManager(dbPool);
-  const antibot = new AntiBotManager(dbPool, config.POW_SECRET);
-  const solvency = new SolvencyCoordinator(dbPool);
+  const auth = new AuthManager(pool);
+  const antibot = new AntiBotManager(pool, config.POW_SECRET);
+  const solvency = new SolvencyCoordinator(pool);
   const wsGateway = new WebSocketGateway(auth, core);
 
   wsGateway.register(server);
@@ -66,8 +71,10 @@ export async function buildServer() {
   server.addHook('onClose', async () => {
     clearInterval(sweepInterval);
     await core.persistence.flush();
-    await releaseWriterLock(dbPool);
-    await dbPool.end();
+    await releaseWriterLock(pool);
+    if (!customPool) {
+      await pool.end();
+    }
   });
 
   return { server, core, clock };

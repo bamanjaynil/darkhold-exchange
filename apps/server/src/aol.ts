@@ -59,8 +59,20 @@ export class AppendOnlyJournal {
     this.isFlushScheduled = true;
     setImmediate(() => {
       this.isFlushScheduled = false;
-      this.flushSync();
+      this.flushAsync();
     });
+  }
+
+  public flushAsync(): void {
+    if (this.bufferOffset > 0) {
+      const len = this.bufferOffset;
+      const slice = Buffer.allocUnsafe(len);
+      this.writeBuffer.copy(slice, 0, 0, len);
+      this.bufferOffset = 0;
+      fs.write(this.fd, slice, 0, len, null, (err) => {
+        if (err) console.error('[AOL] Async write failed:', err);
+      });
+    }
   }
 
   /**
@@ -120,14 +132,14 @@ export class AppendOnlyJournal {
 
     // Fixed-length Strings (88 bytes)
     // 1. orderId (32 bytes)
-    buf.utf8Write(orderId, offset, 31);
+    (buf as any).utf8Write(orderId, offset, 31);
     offset += 32;
 
     // 2. userId (32 bytes = 8 words)
     let wOff = offset >> 2;
     if (userId !== this.lastUserId) {
       this.lastUserBuf.fill(0);
-      this.lastUserBuf.utf8Write(userId, 0, 31);
+      (this.lastUserBuf as any).utf8Write(userId, 0, 31);
       const tempView = new Uint32Array(this.lastUserBuf.buffer, this.lastUserBuf.byteOffset, 8);
       this.uW0 = tempView[0]!;
       this.uW1 = tempView[1]!;
@@ -154,7 +166,7 @@ export class AppendOnlyJournal {
     // 3. symbol (24 bytes = 6 words)
     if (symbol !== this.lastSymbol) {
       this.lastSymbolBuf.fill(0);
-      this.lastSymbolBuf.utf8Write(symbol, 0, 23);
+      (this.lastSymbolBuf as any).utf8Write(symbol, 0, 23);
       const tempView = new Uint32Array(this.lastSymbolBuf.buffer, this.lastSymbolBuf.byteOffset, 6);
       this.sW0 = tempView[0]!;
       this.sW1 = tempView[1]!;

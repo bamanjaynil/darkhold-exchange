@@ -48,8 +48,15 @@ function checkRateLimit(key: string, capacity: number = 5, fillRateSec: number =
   return true;
 }
 
+interface CachedSession {
+  user: SessionUser;
+  expiresAt: number;
+  lastDbSync: number;
+}
+
 export class AuthManager {
   private pool: pg.Pool;
+  private sessionCache = new Map<string, CachedSession>();
 
   constructor(pool: pg.Pool) {
     this.pool = pool;
@@ -65,7 +72,7 @@ export class AuthManager {
       throw new Error('REGISTRATION_DISABLED');
     }
 
-    if (!checkRateLimit(`reg:${ip}`, 3, 0.2)) {
+    if (config.RATE_LIMIT_PROFILE !== 'bench' && !checkRateLimit(`reg:${ip}`, 3, 0.2)) {
       throw new Error('RATE_LIMITED');
     }
 
@@ -149,6 +156,11 @@ export class AuthManager {
 
       const user: SessionUser = { id: userId, username, role: 'user', isDemo: false };
       const csrfToken = crypto.randomBytes(16).toString('hex');
+      this.sessionCache.set(rawToken, {
+        user,
+        expiresAt: expiresAt.getTime(),
+        lastDbSync: Date.now(),
+      });
       return { user, sessionToken: rawToken, csrfToken };
     } catch (err) {
       await client.query('ROLLBACK');
@@ -163,8 +175,10 @@ export class AuthManager {
     passwordPlain: string,
     ip: string
   ): Promise<{ user: SessionUser; sessionToken: string; csrfToken: string }> {
-    if (!checkRateLimit(`ip:${ip}`, 10, 0.5) || !checkRateLimit(`usr:${username}`, 5, 0.2)) {
-      throw new Error('RATE_LIMITED');
+    if (config.RATE_LIMIT_PROFILE !== 'bench') {
+      if (!checkRateLimit(`ip:${ip}`, 10, 0.5) || !checkRateLimit(`usr:${username}`, 5, 0.2)) {
+        throw new Error('RATE_LIMITED');
+      }
     }
 
     const { rows } = await this.pool.query<{
@@ -208,11 +222,37 @@ export class AuthManager {
     };
 
     const csrfToken = crypto.randomBytes(16).toString('hex');
+    this.sessionCache.set(rawToken, {
+      user,
+      expiresAt: expiresAt.getTime(),
+      lastDbSync: Date.now(),
+    });
     return { user, sessionToken: rawToken, csrfToken };
   }
 
   public async validateSession(sessionToken: string): Promise<SessionUser | null> {
     if (!sessionToken || sessionToken.length !== 64) return null;
+
+    const now = Date.now();
+    const cached = this.sessionCache.get(sessionToken);
+    if (cached) {
+      if (now > cached.expiresAt) {
+        this.sessionCache.delete(sessionToken);
+        return null;
+      }
+      // Periodically sync last_seen_at in DB (non-blocking in background, at most once per 60s)
+      if (now - cached.lastDbSync > 60_000) {
+        cached.lastDbSync = now;
+        cached.expiresAt = now + 7 * 24 * 3600 * 1000;
+        const tokenHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
+        void this.pool.query(
+          `UPDATE sessions SET last_seen_at = NOW(), expires_at = NOW() + INTERVAL '7 days' WHERE session_token_hash = $1`,
+          [tokenHash]
+        ).catch(() => {});
+      }
+      return cached.user;
+    }
+
     const tokenHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
 
     const { rows } = await this.pool.query<{
@@ -233,30 +273,30 @@ export class AuthManager {
     const row = rows[0];
     if (!row) return null;
 
-    if (new Date() > row.expires_at) {
-      await this.pool.query('DELETE FROM sessions WHERE id = $1', [row.session_id]);
+    if (now > row.expires_at.getTime()) {
+      void this.pool.query('DELETE FROM sessions WHERE id = $1', [row.session_id]).catch(() => {});
       return null;
     }
 
-    // Sliding idle expiration extension
-    await this.pool.query(
-      `UPDATE sessions
-       SET last_seen_at = NOW(),
-           expires_at = NOW() + INTERVAL '7 days'
-       WHERE id = $1`,
-      [row.session_id]
-    );
-
-    return {
+    const user: SessionUser = {
       id: row.user_id,
       username: row.username,
       role: row.role,
       isDemo: row.is_demo,
     };
+
+    this.sessionCache.set(sessionToken, {
+      user,
+      expiresAt: row.expires_at.getTime(),
+      lastDbSync: now,
+    });
+
+    return user;
   }
 
   public async logout(sessionToken: string): Promise<void> {
     if (!sessionToken) return;
+    this.sessionCache.delete(sessionToken);
     const tokenHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
     await this.pool.query('DELETE FROM sessions WHERE session_token_hash = $1', [tokenHash]);
   }

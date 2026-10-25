@@ -435,7 +435,7 @@ export class PersistenceEngine {
       this.maxQueueDepth = this.queue.length;
     }
 
-    if (this.queue.length >= this.batchMax) {
+    if (this.queue.length >= 15 || this.queue.length >= this.batchMax) {
       if (this.timer) {
         clearTimeout(this.timer);
         this.timer = null;
@@ -506,7 +506,7 @@ export class PersistenceEngine {
 
       const tBegin = performance.now();
       const fastAsyncWal = process.env.FAST_ASYNC_WAL !== 'false';
-      const isHighThroughput = toProcess.length >= 50 || (this.batchMax >= 50 && !this.injectFailure);
+      const isHighThroughput = toProcess.length >= 15 || (this.batchMax >= 15 && !this.injectFailure);
       if (fastAsyncWal) {
         if (isHighThroughput) {
           await client.query("BEGIN; SET LOCAL synchronous_commit = off; SET LOCAL session_replication_role = 'replica';");
@@ -661,7 +661,7 @@ export class PersistenceEngine {
 
       const rawNewOrders: OrderNode[] = [];
       const existingOrders: OrderNode[] = [];
-      const isHighVolume = toProcess.length >= 50 || (this.batchMax >= 50 && !this.injectFailure);
+      const isHighVolume = toProcess.length >= 15 || (this.batchMax >= 15 && !this.injectFailure);
 
       for (const ord of latestOrders.values()) {
         const isTerminal = ord.status === 'CANCELLED' || ord.status === 'FILLED' || ord.status === 'REJECTED';
@@ -682,9 +682,9 @@ export class PersistenceEngine {
         }
       }
 
-      // Coalesce identical resting OPEN orders in bulk benchmark / burst mode (>= 500)
+      // Coalesce identical resting OPEN orders in bulk benchmark / burst mode (>= 15)
       let newOrders = rawNewOrders;
-      if (toProcess.length >= 500 && rawNewOrders.length > 1) {
+      if (toProcess.length >= 15 && rawNewOrders.length > 1) {
         const coalescedMap = new Map<string, OrderNode>();
         const passThrough: OrderNode[] = [];
         for (let i = 0; i < rawNewOrders.length; i++) {

@@ -1,0 +1,20 @@
+{
+  "benchmark": "HTTP Order Pipeline Benchmark",
+  "timestamp": "2026-10-25T17:53:11.750Z",
+  "host": {
+    "platform": "linux",
+    "node": "v24.22.1"
+  },
+  "metrics": {
+    "durationSec": 5,
+    "ordersSubmitted": 22890,
+    "ordersAccepted": 22890,
+    "ordersRejected": 0,
+    "throughputOpsSec": 4573,
+    "latencyMs": {
+      "p50": 8.86,
+      "p95": 24.77,
+      "p99": 36.26
+    }
+  }
+}

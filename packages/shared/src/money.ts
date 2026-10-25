@@ -50,10 +50,17 @@ export function toMajorUnits(minor: number): number {
 /**
  * Formats minor units to human-readable DKC display string (e.g. "1,500.00 DKC").
  */
-export function formatDKC(minor: number): string {
-  assertInteger(minor, 'minor');
-  const sign = minor < 0 ? '-' : '';
-  const abs = Math.abs(minor);
+export function formatDKC(minor: number | string | null | undefined): string {
+  if (minor === null || minor === undefined) {
+    return '0.00 DKC';
+  }
+  const num = typeof minor === 'string' ? Number(minor) : minor;
+  if (!Number.isFinite(num) || isNaN(num)) {
+    return '0.00 DKC';
+  }
+  assertInteger(num, 'minor');
+  const sign = num < 0 ? '-' : '';
+  const abs = Math.abs(num);
   const major = Math.floor(abs / MINOR_UNITS_PER_DKC);
   const cents = abs % MINOR_UNITS_PER_DKC;
   const majorStr = major.toLocaleString('en-US');
