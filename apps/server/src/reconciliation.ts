@@ -97,7 +97,7 @@ export async function runReconciliation(
         const coreBal = core.getBalance(r.user_id);
         if (coreBal.available !== comp.available || coreBal.reserved !== comp.reserved || coreBal.escrow !== comp.escrow) {
           anomalies.push(
-            `[RAM_CACHE_DIVERGENCE] User ${r.user_id} in-memory balance differs from reconstructed ledger`
+            `[RAM_CACHE_DIVERGENCE] User ${r.user_id} in-memory balance differs from reconstructed ledger: RAM(avail=${coreBal.available}, res=${coreBal.reserved}, esc=${coreBal.escrow}) vs Ledger(avail=${comp.available}, res=${comp.reserved}, esc=${comp.escrow})`
           );
         }
       }

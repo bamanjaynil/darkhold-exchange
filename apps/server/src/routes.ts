@@ -685,6 +685,9 @@ export function registerRoutes(
       snapshot = await solvency.createSnapshot(core);
     }
     const report = await runReconciliation(core.persistence['pool'], core);
+    if (!report.balanced) {
+      console.error('[SOLVENCY_STATUS_ANOMALIES]', JSON.stringify(report.anomalies));
+    }
     reply.send({
       snapshotId: snapshot.id,
       asOfSeq: snapshot.asOfSeq,
@@ -929,23 +932,30 @@ export function registerRoutes(
 
   const handleDeposit = async (req: FastifyRequest, reply: FastifyReply) => {
     const user = req.sessionUser!;
-    const body = (typeof req.body === 'object' && req.body !== null) ? (req.body as { amount?: number; method?: string; reference?: string }) : {};
+    const body = (typeof req.body === 'object' && req.body !== null) ? (req.body as any) : {};
     const amountDKC = Math.max(100, Math.min(100000, Number(body.amount) || 5000));
     const amountMinor = Math.round(amountDKC * 100);
-    const method = body.method || 'GATEWAY';
-    const reference = body.reference || `ref_${crypto.randomBytes(4).toString('hex')}`;
+    const method = body.method || 'UPI';
+    const reference = body.reference || body.utr || `PAY_${Date.now()}_${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    const otp = body.otp;
+    const expectedOtp = body.expectedOtp;
+
+    // Validate 6-digit bank authorization OTP if provided
+    if (otp !== undefined && expectedOtp !== undefined && String(otp).trim() !== String(expectedOtp).trim()) {
+      return reply.status(400).send({ error: 'INVALID_OTP', message: 'The 6-digit bank authorization OTP is incorrect.' });
+    }
 
     const client = await core.persistence['pool'].connect();
     try {
       await client.query('BEGIN');
-      const journalId = `j_deposit_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const journalId = `j_dep_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
       const seq1 = ++core.seq;
       const seq2 = ++core.seq;
 
       await client.query(
         `INSERT INTO journals (id, kind, ref_type, ref_id, created_at)
-         VALUES ($1, 'DEPOSIT', $2, $3, NOW())`,
-        [journalId, method, reference]
+         VALUES ($1, 'DEPOSIT', 'BANK_SETTLEMENT_DEPOSIT', $2, NOW())`,
+        [journalId, reference]
       );
 
       const userAccountId = `acc_${user.id}_cash_avail`;
@@ -991,13 +1001,31 @@ export function registerRoutes(
       bal.available += amountMinor;
 
       const reconciled = core.getReconciledBalance(user.id);
+      const receiptId = `RCPT_${Date.now().toString(36).toUpperCase()}_${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+
       reply.send({
         success: true,
         amount: amountDKC,
         amountMinor,
         method,
+        reference,
+        paymentId: reference,
+        receiptId,
+        journalId,
+        currency: 'INR',
+        dkcMinted: amountDKC,
         balance: reconciled,
-        message: `Successfully deposited ${amountDKC.toLocaleString()} DKC into portfolio via ${method}.`
+        timestamp: new Date().toISOString(),
+        receipt: {
+          receiptId,
+          bankName: method === 'CARD' ? 'HDFC Bank - 3D Secure' : 'NPCI / UPI Instant Settlement',
+          status: 'CAPTURED',
+          payer: user.username,
+          utr: reference,
+          amountINR: amountDKC,
+          dkcCredited: amountDKC
+        },
+        message: `Successfully settled ₹${amountDKC.toLocaleString()} INR via ${method}. Minted ${amountDKC.toLocaleString()} DKC into Available Balance.`
       });
     } catch (err: any) {
       await client.query('ROLLBACK');

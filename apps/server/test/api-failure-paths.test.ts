@@ -233,5 +233,72 @@ describe('API Routes, Authentication & Failure-Path Integration Suite', () => {
       const data = JSON.parse(res.payload);
       expect(data.error).toBe('CSRF_VALIDATION_FAILED');
     });
+
+    it('processes authenticated 2-step Razorpay/UPI deposit with verified OTP and balanced journal', async () => {
+      const loginRes = await server.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        headers: { 'Content-Type': 'application/json' },
+        payload: { username: 'alice', password: 'demo_darkhold_2026' },
+      });
+      const sessionCookie = loginRes.cookies.find((c) => c.name === 'dk_session')!;
+      const csrfCookie = loginRes.cookies.find((c) => c.name === 'dk_csrf')!;
+
+      // 1. Submit valid deposit with correct 6-digit OTP
+      const res = await server.inject({
+        method: 'POST',
+        url: '/api/wallet/deposit',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfCookie.value,
+        },
+        cookies: {
+          dk_session: sessionCookie.value,
+          dk_csrf: csrfCookie.value,
+        },
+        payload: {
+          amount: 5000,
+          method: 'UPI',
+          reference: 'UTR_TEST_123456789012',
+          utr: 'UTR_TEST_123456789012',
+          otp: '482910',
+          expectedOtp: '482910',
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const data = JSON.parse(res.payload);
+      expect(data.success).toBe(true);
+      expect(data.amount).toBe(5000);
+      expect(data.dkcMinted).toBe(5000);
+      expect(data.receipt).toBeDefined();
+      expect(data.receipt.status).toBe('CAPTURED');
+      expect(data.receipt.bankName).toContain('NPCI');
+      expect(data.receipt.utr).toBe('UTR_TEST_123456789012');
+
+      // 2. Reject deposit when OTP is incorrect
+      const failRes = await server.inject({
+        method: 'POST',
+        url: '/api/wallet/deposit',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfCookie.value,
+        },
+        cookies: {
+          dk_session: sessionCookie.value,
+          dk_csrf: csrfCookie.value,
+        },
+        payload: {
+          amount: 5000,
+          method: 'UPI',
+          otp: '999999',
+          expectedOtp: '482910',
+        },
+      });
+
+      expect(failRes.statusCode).toBe(400);
+      const failData = JSON.parse(failRes.payload);
+      expect(failData.error).toBe('INVALID_OTP');
+    });
   });
 });

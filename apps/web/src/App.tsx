@@ -18,6 +18,7 @@ import { TelemetryRibbon } from './components/TelemetryRibbon.js';
 import { LedgerInspectorDrawer } from './components/LedgerInspectorDrawer.js';
 import { PersonaSwitcher } from './components/PersonaSwitcher.js';
 import { MerkleTreeVisualizer } from './components/MerkleTreeVisualizer.js';
+import { RazorpayCheckoutModal } from './components/RazorpayCheckoutModal.js';
 import { getInstrumentMeta } from './constants/instruments.js';
 
 type Instrument = {
@@ -106,10 +107,9 @@ export default function App() {
   const [isLedgerDrawerOpen, setIsLedgerDrawerOpen] = useState<boolean>(false);
   const [cancellingOrderIds, setCancellingOrderIds] = useState<Set<string>>(new Set());
 
-  // Deposit / Faucet Top-Up State
+  // Deposit / Payment Gateway Checkout State
+  const [showPaymentModal, setShowPaymentModal] = useState<boolean>(false);
   const [showFaucetModal, setShowFaucetModal] = useState<boolean>(false);
-  const [faucetLoading, setFaucetLoading] = useState<boolean>(false);
-  const [faucetMessage, setFaucetMessage] = useState<string | null>(null);
 
   // Order Form State (Tactical Execution Pod)
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
@@ -640,42 +640,6 @@ export default function App() {
       type: 'LIMIT',
       tif: 'GTC',
     });
-  };
-
-  // --- Faucet / Deposit Top-Up Handler ---
-  const handleTopUpDKC = async (amountDKC: number, method: 'UPI' | 'CARD' | 'NETBANKING' = 'UPI') => {
-    if (!user) {
-      setShowAuthModal(true);
-      return;
-    }
-    setFaucetLoading(true);
-    setFaucetMessage(null);
-    try {
-      const res = await fetch('/api/wallet/deposit', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
-        },
-        credentials: 'include',
-        body: JSON.stringify({ amount: amountDKC, method }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok) {
-        if (data.balance) {
-          setBalance(data.balance);
-        }
-        setFaucetMessage(`✓ Successfully deposited +${amountDKC.toLocaleString()} DKC into available balance via ${method}!`);
-        await fetchSession();
-        void syncMarketState();
-      } else {
-        setFaucetMessage(`Error: ${data.error || 'Failed to deposit DKC'}`);
-      }
-    } catch (err: any) {
-      setFaucetMessage(`Network error: ${err.message}`);
-    } finally {
-      setFaucetLoading(false);
-    }
   };
 
   // --- 1-Click Persona Switcher ---
@@ -1559,24 +1523,23 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        setShowFaucetModal(true);
-                        setFaucetMessage(null);
+                        setShowPaymentModal(true);
                       }}
                       style={{
-                        background: 'rgba(0, 240, 255, 0.12)',
-                        border: '1px solid rgba(0, 240, 255, 0.4)',
+                        background: 'linear-gradient(135deg, rgba(0, 240, 255, 0.15) 0%, rgba(16, 185, 129, 0.15) 100%)',
+                        border: '1px solid rgba(0, 240, 255, 0.5)',
                         color: '#00F0FF',
                         borderRadius: 3,
-                        padding: '1px 6px',
+                        padding: '2px 8px',
                         fontSize: 9,
-                        fontWeight: 700,
+                        fontWeight: 800,
                         cursor: 'pointer',
                         fontFamily: '"JetBrains Mono", monospace',
                         transition: 'all 0.15s ease',
                       }}
-                      title="Deposit / Top-up DKC into Available balance via zero-sum double-entry ledger"
+                      title="Deposit INR into DKC via 2-Step Razorpay / NPCI UPI Gateway (1 INR = 1.00 DKC)"
                     >
-                      + TOP-UP
+                      💳 DEPOSIT INR ➔ DKC
                     </button>
                   </div>
                   <strong style={{ color: '#00F0FF' }}>{formatDKC(balance.available)}</strong>
@@ -1606,6 +1569,41 @@ export default function App() {
                     </div>
                   ))
                 )}
+
+                <button
+                  type="button"
+                  onClick={() => setShowPaymentModal(true)}
+                  style={{
+                    marginTop: 8,
+                    background: 'linear-gradient(135deg, rgba(0, 240, 255, 0.12) 0%, rgba(2, 132, 199, 0.12) 100%)',
+                    border: '1px solid rgba(0, 240, 255, 0.4)',
+                    color: '#00F0FF',
+                    borderRadius: 5,
+                    padding: '8px 10px',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                    fontFamily: '"JetBrains Mono", monospace',
+                    letterSpacing: '0.02em',
+                    transition: 'all 0.15s ease',
+                    boxShadow: '0 0 15px rgba(0, 240, 255, 0.1)',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'linear-gradient(135deg, rgba(0, 240, 255, 0.25) 0%, rgba(2, 132, 199, 0.25) 100%)';
+                    e.currentTarget.style.borderColor = '#00F0FF';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'linear-gradient(135deg, rgba(0, 240, 255, 0.12) 0%, rgba(2, 132, 199, 0.12) 100%)';
+                    e.currentTarget.style.borderColor = 'rgba(0, 240, 255, 0.4)';
+                  }}
+                  title="Open 2-step Razorpay / NPCI UPI Payment Gateway Checkout"
+                >
+                  <span>💳</span> Deposit INR ➔ DKC (Payment Gateway)
+                </button>
               </div>
             </div>
           </div>
@@ -3316,161 +3314,27 @@ export default function App() {
         seq={engineSeq}
       />
 
-      {/* Deposit / Faucet Top-Up Modal */}
-      {showFaucetModal && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.85)',
-            backdropFilter: 'blur(5px)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 2100,
-          }}
-        >
-          <div
-            className="card"
-            style={{
-              width: 460,
-              padding: 24,
-              border: '1px solid rgba(0, 240, 255, 0.4)',
-              boxShadow: '0 0 35px rgba(0, 240, 255, 0.15)',
-              position: 'relative',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span style={{ fontSize: 24 }}>🏦</span>
-                <div>
-                  <strong style={{ fontSize: 16, color: '#00F0FF', letterSpacing: '0.04em' }}>
-                    TOP-UP WALLET (DEMO FAUCET)
-                  </strong>
-                  <div style={{ fontSize: 11, color: '#94A3B8' }}>
-                    Double-entry balance injection with zero-sum invariant check
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowFaucetModal(false)}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  color: '#64748B',
-                  fontSize: 18,
-                  cursor: 'pointer',
-                  padding: 4,
-                }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div
-                style={{
-                  background: '#040711',
-                  border: '1px solid #1E293B',
-                  borderRadius: 6,
-                  padding: '12px 14px',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  fontFamily: '"JetBrains Mono", monospace',
-                }}
-              >
-                <div>
-                  <div style={{ color: '#64748B', fontSize: 10 }}>CURRENT AVAILABLE DKC</div>
-                  <div style={{ color: '#00F0FF', fontSize: 18, fontWeight: 800 }}>
-                    {formatDKC(balance.available)}
-                  </div>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ color: '#64748B', fontSize: 10 }}>ACTIVE USER</div>
-                  <div style={{ color: '#F8FAFC', fontWeight: 700, fontSize: 13 }}>
-                    {user ? user.username.toUpperCase() : 'ANONYMOUS'}
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ fontSize: 11, color: '#94A3B8', lineHeight: 1.5 }}>
-                Select an amount to mint directly into your ledger account. Each deposit creates a balanced{' '}
-                <strong style={{ color: '#F8FAFC' }}>DEPOSIT</strong> journal entry (Debit User Cash / Credit Issuer Mint) maintaining exchange solvency (∑ Postings = 0).
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-                {[1000, 5000, 25000].map((amt) => (
-                  <button
-                    key={amt}
-                    disabled={faucetLoading}
-                    onClick={() => handleTopUpDKC(amt)}
-                    style={{
-                      background: 'rgba(0, 240, 255, 0.08)',
-                      border: '1px solid rgba(0, 240, 255, 0.3)',
-                      color: '#00F0FF',
-                      borderRadius: 6,
-                      padding: '14px 8px',
-                      cursor: faucetLoading ? 'not-allowed' : 'pointer',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      gap: 4,
-                      fontFamily: '"JetBrains Mono", monospace',
-                      transition: 'all 0.15s ease',
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.background = 'rgba(0, 240, 255, 0.2)';
-                      e.currentTarget.style.borderColor = '#00F0FF';
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.background = 'rgba(0, 240, 255, 0.08)';
-                      e.currentTarget.style.borderColor = 'rgba(0, 240, 255, 0.3)';
-                    }}
-                  >
-                    <span style={{ fontSize: 15, fontWeight: 900 }}>+{amt.toLocaleString()}</span>
-                    <span style={{ fontSize: 10, color: '#64748B' }}>DKC</span>
-                  </button>
-                ))}
-              </div>
-
-              {faucetMessage && (
-                <div
-                  style={{
-                    padding: '8px 12px',
-                    borderRadius: 4,
-                    fontSize: 11,
-                    fontFamily: '"JetBrains Mono", monospace',
-                    background: faucetMessage.startsWith('✓') ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-                    color: faucetMessage.startsWith('✓') ? '#10B981' : '#EF4444',
-                    border: `1px solid ${faucetMessage.startsWith('✓') ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
-                  }}
-                >
-                  {faucetMessage}
-                </div>
-              )}
-
-              <button
-                type="button"
-                onClick={() => setShowFaucetModal(false)}
-                style={{
-                  background: '#1E293B',
-                  color: '#94A3B8',
-                  border: 'none',
-                  borderRadius: 4,
-                  padding: 10,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  fontFamily: '"JetBrains Mono", monospace',
-                }}
-              >
-                CLOSE
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* 2-Step Razorpay / NPCI UPI Sandbox Payment Gateway Checkout Modal */}
+      <RazorpayCheckoutModal
+        isOpen={showPaymentModal || showFaucetModal}
+        onClose={() => {
+          setShowPaymentModal(false);
+          setShowFaucetModal(false);
+        }}
+        user={user}
+        csrfToken={csrfToken}
+        currentAvailableMinor={balance.available}
+        onSuccess={async (newBalance) => {
+          setBalance({
+            available: newBalance.available,
+            reserved: newBalance.reserved,
+            escrow: newBalance.escrow,
+            total: newBalance.total ?? (newBalance.available + newBalance.reserved + newBalance.escrow),
+          });
+          await fetchSession();
+          void syncMarketState();
+        }}
+      />
 
       {/* 6. Auth Modal */}
       {showAuthModal && (
