@@ -803,38 +803,38 @@ export function registerRoutes(
 
       // 1. Double-entry Journal
       await client.query(
-        `INSERT INTO journals (id, kind, ref_type, ref_id, seq, created_at)
-         VALUES ($1, 'DEPOSIT', 'FAUCET', $2, $3, NOW())`,
-        [journalId, user.id, seq]
+        `INSERT INTO journals (id, kind, ref_type, ref_id, created_at)
+         VALUES ($1, 'DEPOSIT', 'FAUCET', $2, NOW())`,
+        [journalId, user.id]
       );
 
       // 2. Resolve accounts
-      const userAccountId = `acc_${user.id}_cash`;
+      const userAccountId = `acc_${user.id}_cash_avail`;
       const issuerAccountId = 'acc_issuer_cash';
 
       await client.query(
-        `INSERT INTO ledger_accounts (id, owner_user_id, kind, unit, created_at)
-         VALUES ($1, $2, 'CASH', 'DKC', NOW())
+        `INSERT INTO ledger_accounts (id, kind, owner_user_id, instrument_id, created_at)
+         VALUES ($1, 'USER_AVAILABLE', $2, NULL, NOW())
          ON CONFLICT (id) DO NOTHING`,
         [userAccountId, user.id]
       );
 
       await client.query(
-        `INSERT INTO ledger_accounts (id, owner_user_id, kind, unit, created_at)
-         VALUES ($1, NULL, 'ISSUER_CASH', 'DKC', NOW())
+        `INSERT INTO ledger_accounts (id, kind, owner_user_id, instrument_id, created_at)
+         VALUES ($1, 'ISSUER', NULL, NULL, NOW())
          ON CONFLICT (id) DO NOTHING`,
         [issuerAccountId]
       );
 
       // 3. Postings: balanced zero-sum (User DR / Issuer CR)
       await client.query(
-        `INSERT INTO postings (id, journal_id, account_id, unit, amount, seq)
+        `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
          VALUES 
-          ($1, $2, $3, 'DKC', $4, $5),
-          ($6, $2, $7, 'DKC', $8, $9)`,
+          ($1, $2, 'CASH', $3, $4),
+          ($1, $5, 'CASH', $6, $7)`,
         [
-          `pst_${journalId}_1`, journalId, userAccountId, amountMinor, seq,
-          `pst_${journalId}_2`, journalId, issuerAccountId, -amountMinor, seq + 1
+          journalId, userAccountId, amountMinor, seq,
+          issuerAccountId, -amountMinor, seq + 1
         ]
       );
 
@@ -883,36 +883,36 @@ export function registerRoutes(
       const seq = ++core.seq;
 
       await client.query(
-        `INSERT INTO journals (id, kind, ref_type, ref_id, seq, created_at)
-         VALUES ($1, 'DEPOSIT', 'FAUCET', $2, $3, NOW())`,
-        [journalId, user.id, seq]
+        `INSERT INTO journals (id, kind, ref_type, ref_id, created_at)
+         VALUES ($1, 'DEPOSIT', 'FAUCET', $2, NOW())`,
+        [journalId, user.id]
       );
 
-      const userAccountId = `acc_${user.id}_cash`;
+      const userAccountId = `acc_${user.id}_cash_avail`;
       const issuerAccountId = 'acc_issuer_cash';
 
       await client.query(
-        `INSERT INTO ledger_accounts (id, owner_user_id, kind, unit, created_at)
-         VALUES ($1, $2, 'CASH', 'DKC', NOW())
+        `INSERT INTO ledger_accounts (id, kind, owner_user_id, instrument_id, created_at)
+         VALUES ($1, 'USER_AVAILABLE', $2, NULL, NOW())
          ON CONFLICT (id) DO NOTHING`,
         [userAccountId, user.id]
       );
 
       await client.query(
-        `INSERT INTO ledger_accounts (id, owner_user_id, kind, unit, created_at)
-         VALUES ($1, NULL, 'ISSUER_CASH', 'DKC', NOW())
+        `INSERT INTO ledger_accounts (id, kind, owner_user_id, instrument_id, created_at)
+         VALUES ($1, 'ISSUER', NULL, NULL, NOW())
          ON CONFLICT (id) DO NOTHING`,
         [issuerAccountId]
       );
 
       await client.query(
-        `INSERT INTO postings (id, journal_id, account_id, unit, amount, seq)
+        `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
          VALUES 
-          ($1, $2, $3, 'DKC', $4, $5),
-          ($6, $2, $7, 'DKC', $8, $9)`,
+          ($1, $2, 'CASH', $3, $4),
+          ($1, $5, 'CASH', $6, $7)`,
         [
-          `pst_${journalId}_1`, journalId, userAccountId, amountMinor, seq,
-          `pst_${journalId}_2`, journalId, issuerAccountId, -amountMinor, seq + 1
+          journalId, userAccountId, amountMinor, seq,
+          issuerAccountId, -amountMinor, seq + 1
         ]
       );
 
