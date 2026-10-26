@@ -657,6 +657,7 @@ export function registerRoutes(
   });
 
   server.get('/api/solvency/proof', { preHandler: requireAuth }, async (req, reply) => {
+    await core.persistence.flush();
     const proof = await solvency.getProofForUser(req.sessionUser!.id, core);
     if (!proof) {
       return reply.status(404).send({ error: 'NO_LIABILITIES_FOR_USER' });
@@ -665,8 +666,9 @@ export function registerRoutes(
   });
 
   server.get('/api/solvency/status', async (_req, reply) => {
+    await core.persistence.flush();
     let snapshot = solvency.getLatestSnapshot();
-    if (!snapshot) {
+    if (!snapshot || snapshot.asOfSeq !== core.seq) {
       snapshot = await solvency.createSnapshot(core);
     }
     const report = await runReconciliation(core.persistence['pool'], core);
@@ -681,6 +683,7 @@ export function registerRoutes(
   });
 
   server.post('/api/admin/solvency/snapshot', { preHandler: requireAdmin }, async (_req, reply) => {
+    await core.persistence.flush();
     const snapshot = await solvency.createSnapshot(core);
     reply.send(snapshot);
   });
@@ -688,6 +691,7 @@ export function registerRoutes(
   // --- 7. ADMIN, RECONCILIATION & SCALPER DEMO ---
 
   server.get('/api/admin/reconcile', { preHandler: requireAdmin }, async (_req, reply) => {
+    await core.persistence.flush();
     const report = await runReconciliation(core.persistence['pool'], core);
     reply.send(report);
   });
@@ -749,7 +753,7 @@ export function registerRoutes(
     }
 
     try {
-      await performDemoReset(core, core.persistence['pool']);
+      await performDemoReset(core, core.persistence['pool'], solvency);
       reply.send({ success: true, message: 'Market state reset successfully.' });
     } catch (err: any) {
       reply.status(500).send({ error: err.message || 'RESET_FAILED' });

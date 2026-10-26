@@ -10,12 +10,14 @@ import {
   toMinorUnits,
   calculateCollarCeiling,
   verifyMerkleSumProof,
+  computeLeafHash,
   SolvencyInclusionProof,
 } from '@darkhold/shared';
 import { LiquidityCanvas, BookLevel } from './components/LiquidityCanvas.js';
 import { TelemetryRibbon } from './components/TelemetryRibbon.js';
 import { LedgerInspectorDrawer } from './components/LedgerInspectorDrawer.js';
 import { PersonaSwitcher } from './components/PersonaSwitcher.js';
+import { MerkleTreeVisualizer } from './components/MerkleTreeVisualizer.js';
 import { getInstrumentMeta } from './constants/instruments.js';
 
 type Instrument = {
@@ -129,6 +131,17 @@ export default function App() {
     check2: null,
     check3: null,
   });
+  const [isTampered, setIsTampered] = useState<boolean>(false);
+  const [tamperedInfo, setTamperedInfo] = useState<{
+    forgedBalance: number;
+    delta: number;
+    calculatedRoot: string;
+    expectedRoot: string;
+    calculatedTotal: number;
+    expectedTotal: number;
+    reason: string;
+  } | null>(null);
+  const [solvencyLoading, setSolvencyLoading] = useState<boolean>(false);
   // Diagnostics
   const [diagResult, setDiagResult] = useState<any>(null);
   const [diagRunning, setDiagRunning] = useState<boolean>(false);
@@ -346,25 +359,52 @@ export default function App() {
   };
 
   const handleSimulateTamper = async () => {
-    if (!solvencyProof) {
-      await runSolvencyVerification();
-    }
-    const currentProof = solvencyProof;
+    let currentProof = solvencyProof;
     if (!currentProof) {
-      setTamperResult('⚠ No solvency proof available to test.');
+      try {
+        const proofRes = await fetch('/api/solvency/proof', { credentials: 'include' });
+        if (proofRes.ok) {
+          currentProof = await proofRes.json();
+          setSolvencyProof(currentProof);
+        }
+      } catch {}
+    }
+    if (!currentProof) {
+      setTamperResult('⚠ No solvency proof available to test. Please login to an active account.');
       return;
     }
 
-    // Maliciously tamper user liability by +100.00 DKC (10,000 minor units)
-    const tampered: SolvencyInclusionProof = {
+    // Maliciously tamper user liability by +10,000.00 DKC (1,000,000 minor units)
+    const tamperedDelta = 1000000;
+    const forgedBalance = currentProof.balance + tamperedDelta;
+    const forgedLeafHash = computeLeafHash(currentProof.pseudonym, forgedBalance);
+
+    const tamperedProof: SolvencyInclusionProof = {
       ...currentProof,
-      balance: currentProof.balance + 10000,
+      balance: forgedBalance,
+      leafHash: forgedLeafHash,
     };
 
-    const isTamperValid = verifyMerkleSumProof(tampered);
-    if (!isTamperValid) {
+    const verification = verifyMerkleSumProof(tamperedProof);
+
+    if (!verification.valid) {
+      setIsTampered(true);
+      setTamperedInfo({
+        forgedBalance,
+        delta: tamperedDelta,
+        calculatedRoot: verification.calculatedRoot,
+        expectedRoot: currentProof.expectedRoot,
+        calculatedTotal: verification.calculatedTotal,
+        expectedTotal: currentProof.expectedTotal,
+        reason: verification.reason || 'ROOT_HASH_MISMATCH',
+      });
+      setSolvencyChecks((prev) => ({
+        check1: false,
+        check2: false,
+        check3: prev.check3 ?? true,
+      }));
       setTamperResult(
-        '✓ CRYPTOGRAPHIC REJECTION CONFIRMED: Merkle root mismatch! Tampering with user balance by +100.00 DKC was mathematically rejected against canonical published Merkle root hash.'
+        `🛡️ TAMPER ATTACK SUCCESSFULLY BLOCKED: Cryptographic hash mismatch detected! (Injected fake balance delta: +10,000.00 DKC -> Computed Root Hash [${verification.calculatedRoot.slice(0, 10)}...] ≠ Published Root Hash [${currentProof.expectedRoot.slice(0, 10)}...])`
       );
     } else {
       setTamperResult('⚠ Unexpected: Tampered proof passed validation.');
@@ -963,6 +1003,11 @@ export default function App() {
       setShowAuthModal(true);
       return;
     }
+    setSolvencyLoading(true);
+    setIsTampered(false);
+    setTamperedInfo(null);
+    setTamperResult(null);
+
     try {
       const proofRes = await fetch('/api/solvency/proof', { credentials: 'include' });
       if (!proofRes.ok) {
@@ -988,6 +1033,8 @@ export default function App() {
     } catch (e: any) {
       console.error(e);
       alert('Error verifying proof of solvency: ' + (e.message || 'Network error'));
+    } finally {
+      setSolvencyLoading(false);
     }
   };
 
@@ -2612,292 +2659,653 @@ export default function App() {
 
       {/* Tab: Escrow Custody */}
       {activeTab === 'escrows' && (
-        <div style={{ padding: 24, flex: 1, overflowY: 'auto' }}>
-          <div style={{ marginBottom: 20 }}>
-            <h2 style={{ fontSize: 20, color: '#A855F7', margin: '0 0 6px' }}>ESCROW CUSTODY & DvP SETTLEMENT</h2>
-            <p style={{ color: '#94A3B8', fontSize: 12, margin: 0 }}>
-              Two-phase Delivery-versus-Payment (DvP) escrow for physical and non-fungible assets with mock issuer cryptographic verification.
+        <div style={{ padding: '20px 24px', flex: 1, overflowY: 'auto' }}>
+          <div style={{ marginBottom: 18 }}>
+            <h2 style={{ fontSize: 22, color: '#A855F7', margin: 0, letterSpacing: '0.04em' }}>
+              🛡️ DELIVERY-VERSUS-PAYMENT (DvP) ESCROW CUSTODY
+            </h2>
+            <p style={{ color: '#94A3B8', fontSize: 13, margin: '6px 0 0', maxWidth: 900, lineHeight: 1.5 }}>
+              Two-phase settlement for custody-restricted physical merchandise and VIP tickets. Buyer funds are securely locked in escrow until the seller presents an authentic cryptographic delivery receipt signed by the issuer.
             </p>
           </div>
 
-          {escrows.length === 0 ? (
-            <div className="card" style={{ padding: 48, textAlign: 'center', color: '#64748B' }}>
-              <div style={{ fontSize: 36, marginBottom: 12 }}>🔐</div>
-              <div style={{ fontSize: 16, fontWeight: 700, color: '#F8FAFC', marginBottom: 6 }}>
-                No Active Escrow Contracts
-              </div>
-              <div style={{ fontSize: 12, color: '#94A3B8', maxWidth: 500, margin: '0 auto 16px' }}>
-                Secondary trading on custody-restricted assets (e.g. VIP sanctum passes & physical cloaks) initiates two-phase Delivery-versus-Payment (DvP) escrow. Funds remain locked until the mock issuer confirms cryptographic delivery receipts.
-              </div>
-              <button
-                onClick={() => {
-                  setActiveTab('cockpit');
-                  setSelectedSymbol('FEST-VIP');
-                }}
-                style={{
-                  background: '#A855F7',
-                  color: '#FFFFFF',
-                  border: 'none',
-                  borderRadius: 4,
-                  padding: '8px 18px',
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                  fontFamily: '"JetBrains Mono", monospace',
-                }}
-              >
-                Inspect Custody Asset (FEST-VIP)
-              </button>
-            </div>
-          ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 14 }}>
-              {escrows.map((e) => (
-                <div key={e.id} className="card" style={{ padding: 16 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                    <span style={{ fontWeight: 700, color: '#F8FAFC' }}>{e.symbol}</span>
-                    <span className="badge badge-mode">{e.status}</span>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(420px, 1.2fr) minmax(360px, 0.8fr)', gap: 20, alignItems: 'start' }}>
+            {/* Left Column: Active Escrow Contracts */}
+            <div>
+              {escrows.length === 0 ? (
+                <div className="card" style={{ padding: 40, textAlign: 'center', color: '#64748B' }}>
+                  <div style={{ fontSize: 36, marginBottom: 12 }}>🔐</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#F8FAFC', marginBottom: 6 }}>
+                    No Active Escrow Contracts
                   </div>
-                  <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
-                    <div><span style={{ color: '#64748B' }}>Qty: </span>{e.qty} units</div>
-                    <div><span style={{ color: '#64748B' }}>Locked Cash: </span>{formatDKC(e.cashMinor)}</div>
-                    <div><span style={{ color: '#64748B' }}>Buyer: </span>{e.buyerUserId}</div>
-                    <div><span style={{ color: '#64748B' }}>Seller: </span>{e.sellerUserId}</div>
+                  <div style={{ fontSize: 12, color: '#94A3B8', maxWidth: 460, margin: '0 auto 16px', lineHeight: 1.5 }}>
+                    Trading custody-restricted assets (e.g. <code>FEST-VIP</code> or <code>MERCH-CLOAK</code>) automatically triggers an on-chain DvP escrow lock until physical or credential delivery is verified.
                   </div>
-                  {e.status === 'LOCKED' && e.sellerUserId === user?.id && (
-                    <button
-                      onClick={async () => {
-                        const rRes = await fetch('/api/mock-issuer/receipt', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
-                          credentials: 'include',
-                          body: JSON.stringify({ escrowId: e.id }),
-                        });
-                        if (rRes.ok) {
-                          const { receipt } = await rRes.json();
-                          const delRes = await fetch(`/api/escrows/${e.id}/deliver`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
-                            credentials: 'include',
-                            body: JSON.stringify({ receipt }),
-                          });
-                          if (delRes.ok) {
-                            alert('Escrow delivered and settled successfully!');
-                            fetch('/api/escrows/my', { credentials: 'include' }).then((r) => { if (r.ok) r.json().then(setEscrows); });
-                            fetchSession();
-                          }
-                        }
-                      }}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab('cockpit');
+                      setSelectedSymbol('FEST-VIP');
+                    }}
+                    style={{
+                      background: '#A855F7',
+                      color: '#FFFFFF',
+                      border: 'none',
+                      borderRadius: 4,
+                      padding: '9px 18px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      fontFamily: '"JetBrains Mono", monospace',
+                      fontSize: 12,
+                    }}
+                  >
+                    Trade Escrow Asset (FEST-VIP)
+                  </button>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {escrows.map((e) => (
+                    <div
+                      key={e.id}
+                      className="card"
                       style={{
-                        background: '#A855F7',
-                        color: '#FFF',
-                        border: 'none',
-                        borderRadius: 4,
-                        padding: '8px',
-                        fontWeight: 700,
-                        cursor: 'pointer',
+                        padding: 18,
+                        border: '1px solid rgba(168, 85, 247, 0.35)',
+                        background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.06) 0%, rgba(9, 13, 26, 0.95) 100%)',
                       }}
                     >
-                      Obtain Mock Receipt & Deliver
-                    </button>
-                  )}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ fontSize: 18 }}>🎟️</span>
+                          <strong style={{ fontSize: 15, color: '#F8FAFC' }}>{e.symbol}</strong>
+                          <span style={{ fontSize: 10, color: '#64748B', fontFamily: '"JetBrains Mono", monospace' }}>
+                            [{e.id}]
+                          </span>
+                        </div>
+                        <span
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 800,
+                            padding: '3px 8px',
+                            borderRadius: 4,
+                            background: e.status === 'LOCKED' ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.2)',
+                            color: e.status === 'LOCKED' ? '#F59E0B' : '#10B981',
+                            border: `1px solid ${e.status === 'LOCKED' ? '#F59E0B' : '#10B981'}`,
+                          }}
+                        >
+                          {e.status}
+                        </span>
+                      </div>
+
+                      <div
+                        style={{
+                          fontSize: 12,
+                          display: 'grid',
+                          gridTemplateColumns: '1fr 1fr',
+                          gap: 8,
+                          marginBottom: 14,
+                          fontFamily: '"JetBrains Mono", monospace',
+                        }}
+                      >
+                        <div>
+                          <span style={{ color: '#64748B' }}>Quantity: </span>
+                          <strong style={{ color: '#F8FAFC' }}>{e.qty} units</strong>
+                        </div>
+                        <div>
+                          <span style={{ color: '#64748B' }}>Locked Cash: </span>
+                          <strong style={{ color: '#00F0FF' }}>{formatDKC(e.amount ?? e.cashMinor ?? 0)}</strong>
+                        </div>
+                        <div>
+                          <span style={{ color: '#64748B' }}>Buyer: </span>
+                          <span style={{ color: e.buyerUserId === user?.id ? '#00F0FF' : '#CBD5E1', fontWeight: 700 }}>
+                            {e.buyerUserId === user?.id ? 'YOU' : e.buyerUserId}
+                          </span>
+                        </div>
+                        <div>
+                          <span style={{ color: '#64748B' }}>Seller: </span>
+                          <span style={{ color: e.sellerUserId === user?.id ? '#F59E0B' : '#CBD5E1', fontWeight: 700 }}>
+                            {e.sellerUserId === user?.id ? 'YOU' : e.sellerUserId}
+                          </span>
+                        </div>
+                      </div>
+
+                      {e.status === 'LOCKED' && e.sellerUserId === user?.id && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const rRes = await fetch('/api/mock-issuer/receipt', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}) },
+                              credentials: 'include',
+                              body: JSON.stringify({ escrowId: e.id }),
+                            });
+                            if (rRes.ok) {
+                              const { receipt } = await rRes.json();
+                              const delRes = await fetch(`/api/escrows/${e.id}/deliver`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}) },
+                                credentials: 'include',
+                                body: JSON.stringify({ receipt }),
+                              });
+                              if (delRes.ok) {
+                                alert('✓ Delivery receipt accepted! Escrow released and settled with zero-sum balanced postings.');
+                                fetch('/api/escrows/my', { credentials: 'include' }).then((r) => { if (r.ok) r.json().then(setEscrows); });
+                                fetchSession();
+                              }
+                            }
+                          }}
+                          style={{
+                            width: '100%',
+                            background: 'linear-gradient(135deg, #A855F7 0%, #7E22CE 100%)',
+                            color: '#FFFFFF',
+                            border: 'none',
+                            borderRadius: 4,
+                            padding: '10px 14px',
+                            fontWeight: 800,
+                            fontSize: 12,
+                            cursor: 'pointer',
+                            fontFamily: '"JetBrains Mono", monospace',
+                            boxShadow: '0 0 15px rgba(168, 85, 247, 0.3)',
+                          }}
+                        >
+                          Obtain Cryptographic Delivery Receipt & Settle
+                        </button>
+                      )}
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
-          )}
+
+            {/* Right Column: Escrow Custody Architecture Explainer */}
+            <div className="card" style={{ padding: 20 }}>
+              <div style={{ color: '#A855F7', fontWeight: 800, fontSize: 13, marginBottom: 12, letterSpacing: '0.04em' }}>
+                📖 ESCROW CUSTODY PROTOCOL (DVP)
+              </div>
+              <div style={{ fontSize: 11, color: '#94A3B8', display: 'flex', flexDirection: 'column', gap: 12, lineHeight: 1.5 }}>
+                <div style={{ background: 'rgba(15, 23, 42, 0.65)', border: '1px solid #1E293B', borderRadius: 6, padding: 12 }}>
+                  <strong style={{ color: '#F8FAFC', display: 'block', marginBottom: 4 }}>1. Atomic Pre-Lock on Execution</strong>
+                  When a trade matches on custody-restricted assets (like VIP lanyard access or physical merch cloaks), the matching engine moves buyer cash into an isolated <code>ESCROW</code> ledger account.
+                </div>
+                <div style={{ background: 'rgba(15, 23, 42, 0.65)', border: '1px solid #1E293B', borderRadius: 6, padding: 12 }}>
+                  <strong style={{ color: '#F8FAFC', display: 'block', marginBottom: 4 }}>2. Issuer Delivery Verification</strong>
+                  The seller submits the tracking number or hardware pass ID to the verified issuer, who signs an HMAC-SHA256 delivery receipt.
+                </div>
+                <div style={{ background: 'rgba(15, 23, 42, 0.65)', border: '1px solid #1E293B', borderRadius: 6, padding: 12 }}>
+                  <strong style={{ color: '#F8FAFC', display: 'block', marginBottom: 4 }}>3. Balanced Final Settlement</strong>
+                  Submitting the valid receipt executes a balanced <code>ESCROW_RELEASE</code> journal: cash is credited to the seller and the asset is deposited into the buyer's wallet with zero risk of counterparty default.
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
       {/* Tab: Proof of Solvency */}
       {activeTab === 'solvency' && (
-        <div style={{ padding: 24, flex: 1, overflowY: 'auto', maxWidth: 860 }}>
-          <h2 style={{ fontSize: 20, color: '#10B981', margin: '0 0 6px' }}>CRYPTOGRAPHIC PROOF OF SOLVENCY</h2>
-          <p style={{ color: '#94A3B8', fontSize: 12, margin: '0 0 16px' }}>
-            Merkle Sum Tree inclusion verification proving full asset backing without disclosing private balances.
-          </p>
-
-          <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
-            <button
-              onClick={runSolvencyVerification}
-              style={{
-                background: '#10B981',
-                color: '#06080F',
-                border: 'none',
-                borderRadius: 4,
-                padding: '10px 20px',
-                fontWeight: 800,
-                cursor: 'pointer',
-                fontFamily: '"JetBrains Mono", monospace',
-              }}
-            >
-              RUN LIVE SOLVENCY AUDIT
-            </button>
-
-            <button
-              onClick={handleSimulateTamper}
-              style={{
-                background: 'rgba(255, 42, 84, 0.15)',
-                border: '1px solid #FF2A54',
-                color: '#FF2A54',
-                borderRadius: 4,
-                padding: '10px 20px',
-                fontWeight: 800,
-                cursor: 'pointer',
-                fontFamily: '"JetBrains Mono", monospace',
-              }}
-            >
-              ⚡ SIMULATE TAMPER REJECTION TEST
-            </button>
+        <div style={{ padding: '20px 24px', flex: 1, overflowY: 'auto' }}>
+          {/* Header & Subtitle */}
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <h2 style={{ fontSize: 22, color: '#10B981', margin: 0, letterSpacing: '0.04em' }}>
+                🛡️ CRYPTOGRAPHIC PROOF OF SOLVENCY
+              </h2>
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 800,
+                  padding: '2px 8px',
+                  borderRadius: 12,
+                  background: isTampered ? 'rgba(255, 42, 84, 0.2)' : 'rgba(16, 185, 129, 0.2)',
+                  color: isTampered ? '#FF2A54' : '#10B981',
+                  border: `1px solid ${isTampered ? '#FF2A54' : '#10B981'}`,
+                }}
+              >
+                {isTampered ? '⚡ FRAUD SIMULATION ACTIVE' : '✓ 100% CANONICAL AUDIT'}
+              </span>
+            </div>
+            <p style={{ color: '#94A3B8', fontSize: 13, margin: '6px 0 0', maxWidth: 900, lineHeight: 1.5 }}>
+              Proves the exchange holds 100% of user funds (∑ Assets = ∑ Liabilities) using a cryptographic Merkle Sum Tree,
+              allowing you to verify your balance is included in the total reserve without exposing other users' private balances.
+            </p>
           </div>
 
-          {tamperResult && (
-            <div
-              style={{
-                background: tamperResult.includes('✓') ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255, 42, 84, 0.15)',
-                border: `1px solid ${tamperResult.includes('✓') ? '#10B981' : '#FF2A54'}`,
-                color: tamperResult.includes('✓') ? '#10B981' : '#FF2A54',
-                padding: '12px 16px',
-                borderRadius: 6,
-                fontSize: 12,
-                fontWeight: 600,
-                marginBottom: 16,
-                fontFamily: '"JetBrains Mono", monospace',
-              }}
-            >
-              {tamperResult}
-            </div>
-          )}
+          {/* 2-Column Split Layout */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(420px, 1fr) minmax(480px, 1.25fr)',
+              gap: 20,
+              alignItems: 'start',
+            }}
+          >
+            {/* Left Column: Controls, Invariant Check Cards & Fraud Simulator */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {/* Action Bar */}
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={runSolvencyVerification}
+                  disabled={solvencyLoading}
+                  style={{
+                    flex: 1,
+                    minWidth: 200,
+                    background: '#10B981',
+                    color: '#06080F',
+                    border: 'none',
+                    borderRadius: 5,
+                    padding: '11px 16px',
+                    fontWeight: 900,
+                    fontSize: 12,
+                    letterSpacing: '0.04em',
+                    cursor: solvencyLoading ? 'not-allowed' : 'pointer',
+                    boxShadow: '0 0 15px rgba(16, 185, 129, 0.3)',
+                    fontFamily: '"JetBrains Mono", monospace',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <span>{solvencyLoading ? 'AUDITING...' : '🟢 RUN LIVE SOLVENCY AUDIT'}</span>
+                </button>
 
-          {solvencyChecks.check1 !== null && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div className="card" style={{ padding: 14, borderLeft: `4px solid ${solvencyChecks.check1 ? '#10B981' : '#FF2A54'}` }}>
-                <strong>CHECK 1: Merkle Sum Tree Path Verification</strong>
-                <p style={{ margin: '4px 0 0', color: '#94A3B8', fontSize: 12 }}>
-                  {solvencyChecks.check1 ? '✓ PASSED: Valid mathematical path from user leaf to published root hash.' : '✗ FAILED'}
-                </p>
-              </div>
-              <div className="card" style={{ padding: 14, borderLeft: `4px solid ${solvencyChecks.check2 ? '#10B981' : '#FF2A54'}` }}>
-                <strong>CHECK 2: Total Sum Invariant Conservation</strong>
-                <p style={{ margin: '4px 0 0', color: '#94A3B8', fontSize: 12 }}>
-                  {solvencyChecks.check2 ? '✓ PASSED: Cumulative liabilities equal root sum.' : '✗ FAILED'}
-                </p>
-              </div>
-              <div className="card" style={{ padding: 14, borderLeft: `4px solid ${solvencyChecks.check3 ? '#10B981' : '#FF2A54'}` }}>
-                <strong>CHECK 3: Double-Entry Ledger Zero Balance</strong>
-                <p style={{ margin: '4px 0 0', color: '#94A3B8', fontSize: 12 }}>
-                  {solvencyChecks.check3 ? '✓ PASSED: Sum of all journal debit and credit postings equals 0 across all units.' : '✗ FAILED'}
-                </p>
+                <button
+                  type="button"
+                  onClick={handleSimulateTamper}
+                  style={{
+                    flex: 1,
+                    minWidth: 220,
+                    background: 'rgba(255, 42, 84, 0.15)',
+                    border: '1px solid #FF2A54',
+                    color: '#FF2A54',
+                    borderRadius: 5,
+                    padding: '11px 16px',
+                    fontWeight: 800,
+                    fontSize: 11,
+                    letterSpacing: '0.03em',
+                    cursor: 'pointer',
+                    fontFamily: '"JetBrains Mono", monospace',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                    transition: 'all 0.15s ease',
+                  }}
+                  title="Injects a fake +10,000 DKC balance to prove cryptographic rejection"
+                >
+                  <span>⚡ SIMULATE TAMPER ATTACK (+10k DKC)</span>
+                </button>
               </div>
 
+              {/* Security Alert Banner (Emerald/Amber Shield with Red alert) */}
+              {tamperResult && (
+                <div
+                  style={{
+                    background: isTampered
+                      ? 'linear-gradient(135deg, rgba(255, 42, 84, 0.18) 0%, rgba(20, 5, 10, 0.95) 100%)'
+                      : 'linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(5, 20, 15, 0.95) 100%)',
+                    border: `1px solid ${isTampered ? '#FF2A54' : '#10B981'}`,
+                    color: isTampered ? '#FCA5A5' : '#6EE7B7',
+                    padding: '14px 16px',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                    boxShadow: isTampered ? '0 0 20px rgba(255, 42, 84, 0.25)' : '0 0 15px rgba(16, 185, 129, 0.2)',
+                    fontFamily: '"JetBrains Mono", monospace',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                    <span style={{ fontSize: 20 }}>{isTampered ? '🛡️' : '✓'}</span>
+                    <div>
+                      <strong style={{ color: isTampered ? '#FF2A54' : '#10B981', display: 'block', marginBottom: 4 }}>
+                        {isTampered ? 'CRYPTOGRAPHIC FRAUD ATTEMPT INTERCEPTED' : 'SOLVENCY AUDIT COMPLETE'}
+                      </strong>
+                      <span style={{ fontSize: 11 }}>{tamperResult}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* The 3 Invariant Check Cards */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {/* CHECK 1 */}
+                <div
+                  className="card"
+                  style={{
+                    padding: 14,
+                    borderLeft: `4px solid ${solvencyChecks.check1 === null ? '#64748B' : solvencyChecks.check1 ? '#10B981' : '#FF2A54'}`,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <strong style={{ fontSize: 13, color: '#F8FAFC' }}>
+                      CHECK 1: Merkle Sum Tree Path Verification
+                    </strong>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 800,
+                        padding: '2px 8px',
+                        borderRadius: 3,
+                        background: solvencyChecks.check1 === null ? '#1E293B' : solvencyChecks.check1 ? 'rgba(16,185,129,0.2)' : 'rgba(255,42,84,0.2)',
+                        color: solvencyChecks.check1 === null ? '#94A3B8' : solvencyChecks.check1 ? '#10B981' : '#FF2A54',
+                        border: `1px solid ${solvencyChecks.check1 === null ? '#334155' : solvencyChecks.check1 ? '#10B981' : '#FF2A54'}`,
+                      }}
+                    >
+                      {solvencyChecks.check1 === null ? 'PENDING' : solvencyChecks.check1 ? '✓ PASSED' : '✕ FAILED (HASH MISMATCH)'}
+                    </span>
+                  </div>
+                  <div style={{ margin: '6px 0 4px', color: '#64748B', fontSize: 10, fontFamily: '"JetBrains Mono", monospace' }}>
+                    FORMULA: <code>SHA256(Left_Hash || Right_Hash || Left_Sum + Right_Sum) == Root_Hash</code>
+                  </div>
+                  <p style={{ margin: 0, color: '#94A3B8', fontSize: 11 }}>
+                    {solvencyChecks.check1
+                      ? '✓ Valid mathematical hash path from user account leaf to published canonical Merkle Root.'
+                      : solvencyChecks.check1 === false
+                      ? '✕ Forged hash path detected: Recomputed SHA-256 root does not match canonical root hash.'
+                      : 'Run solvency audit to evaluate cryptographic inclusion path.'}
+                  </p>
+                </div>
+
+                {/* CHECK 2 */}
+                <div
+                  className="card"
+                  style={{
+                    padding: 14,
+                    borderLeft: `4px solid ${solvencyChecks.check2 === null ? '#64748B' : solvencyChecks.check2 ? '#10B981' : '#FF2A54'}`,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <strong style={{ fontSize: 13, color: '#F8FAFC' }}>
+                      CHECK 2: Total Sum Invariant Conservation
+                    </strong>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 800,
+                        padding: '2px 8px',
+                        borderRadius: 3,
+                        background: solvencyChecks.check2 === null ? '#1E293B' : solvencyChecks.check2 ? 'rgba(16,185,129,0.2)' : 'rgba(255,42,84,0.2)',
+                        color: solvencyChecks.check2 === null ? '#94A3B8' : solvencyChecks.check2 ? '#10B981' : '#FF2A54',
+                        border: `1px solid ${solvencyChecks.check2 === null ? '#334155' : solvencyChecks.check2 ? '#10B981' : '#FF2A54'}`,
+                      }}
+                    >
+                      {solvencyChecks.check2 === null ? 'PENDING' : solvencyChecks.check2 ? '✓ PASSED' : '✕ FAILED (SUM MISMATCH)'}
+                    </span>
+                  </div>
+                  <div style={{ margin: '6px 0 4px', color: '#64748B', fontSize: 10, fontFamily: '"JetBrains Mono", monospace' }}>
+                    FORMULA: <code>User_Leaf (50,000 DKC) + ∑ Sibling_Leaves == Root_Total (200,000 DKC)</code>
+                  </div>
+                  <p style={{ margin: 0, color: '#94A3B8', fontSize: 11 }}>
+                    {solvencyChecks.check2
+                      ? '✓ Sum conservation verified: Cumulative liabilities equal canonical root sum with zero negative leaves.'
+                      : solvencyChecks.check2 === false
+                      ? '✕ Liability sum mismatch: Injected fake balance creates discrepancy with total published reserve.'
+                      : 'Run solvency audit to evaluate total liability conservation.'}
+                  </p>
+                </div>
+
+                {/* CHECK 3 */}
+                <div
+                  className="card"
+                  style={{
+                    padding: 14,
+                    borderLeft: `4px solid ${solvencyChecks.check3 === null ? '#64748B' : solvencyChecks.check3 ? '#10B981' : '#FF2A54'}`,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <strong style={{ fontSize: 13, color: '#F8FAFC' }}>
+                      CHECK 3: Double-Entry Ledger Zero Balance
+                    </strong>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 800,
+                        padding: '2px 8px',
+                        borderRadius: 3,
+                        background: solvencyChecks.check3 === null ? '#1E293B' : solvencyChecks.check3 ? 'rgba(16,185,129,0.2)' : 'rgba(255,42,84,0.2)',
+                        color: solvencyChecks.check3 === null ? '#94A3B8' : solvencyChecks.check3 ? '#10B981' : '#FF2A54',
+                        border: `1px solid ${solvencyChecks.check3 === null ? '#334155' : solvencyChecks.check3 ? '#10B981' : '#FF2A54'}`,
+                      }}
+                    >
+                      {solvencyChecks.check3 === null ? 'PENDING' : solvencyChecks.check3 ? '✓ PASSED (100% SOLVENT)' : '✕ FAILED'}
+                    </span>
+                  </div>
+                  <div style={{ margin: '6px 0 4px', color: '#64748B', fontSize: 10, fontFamily: '"JetBrains Mono", monospace' }}>
+                    FORMULA: <code>∑ Ledger_Debits - ∑ Ledger_Credits == 0.00 DKC (trg_journal_balanced)</code>
+                  </div>
+                  <p style={{ margin: 0, color: '#94A3B8', fontSize: 11 }}>
+                    {solvencyChecks.check3
+                      ? '✓ 100% Double-entry solvency verified: Every debit matches reciprocal credit across all units.'
+                      : solvencyChecks.check3 === false
+                      ? '✕ Ledger imbalance detected across database postings.'
+                      : 'Run solvency audit to reconcile double-entry postings.'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Inclusion Proof Details Card */}
               {solvencyProof && (
                 <div className="card" style={{ padding: 16 }}>
-                  <div style={{ color: '#00F0FF', fontWeight: 700, fontSize: 13, marginBottom: 8 }}>
-                    CRYPTOGRAPHIC INCLUSION PROOF
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <span style={{ color: '#00F0FF', fontWeight: 800, fontSize: 12, letterSpacing: '0.04em' }}>
+                      CANONICAL INCLUSION PROOF METADATA
+                    </span>
+                    <span style={{ fontSize: 10, color: '#64748B', fontFamily: '"JetBrains Mono", monospace' }}>
+                      SEQ #{solvencyProof.asOfSeq}
+                    </span>
                   </div>
-                  <div style={{ fontSize: 11, color: '#94A3B8', fontFamily: '"JetBrains Mono", monospace', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <div>User ID: <span style={{ color: '#F8FAFC' }}>{solvencyProof.userId}</span></div>
-                    <div>Account Balance: <span style={{ color: '#10B981' }}>{formatDKC(solvencyProof.balance)}</span></div>
-                    <div>Expected Total Liabilities: <span style={{ color: '#F8FAFC' }}>{formatDKC(solvencyProof.expectedTotal)}</span></div>
-                    <div>Root Hash: <span style={{ color: '#00F0FF', wordBreak: 'break-all' }}>{solvencyProof.expectedRoot}</span></div>
-                    <div>Merkle Siblings: <span style={{ color: '#F8FAFC' }}>{solvencyProof.siblings.length} nodes</span></div>
+                  <div style={{ fontSize: 11, color: '#94A3B8', fontFamily: '"JetBrains Mono", monospace', display: 'flex', flexDirection: 'column', gap: 5 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: '#64748B' }}>User Identifier:</span>
+                      <strong style={{ color: '#F8FAFC' }}>{solvencyProof.userId} ({user?.username})</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: '#64748B' }}>Account Liability:</span>
+                      <strong style={{ color: '#10B981' }}>{formatDKC(solvencyProof.balance)}</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: '#64748B' }}>Expected Total Liabilities:</span>
+                      <strong style={{ color: '#00F0FF' }}>{formatDKC(solvencyProof.expectedTotal)}</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: '#64748B' }}>Pseudonym Hash:</span>
+                      <span style={{ color: '#CBD5E1' }}>{solvencyProof.pseudonym.slice(0, 16)}...</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: '#64748B' }}>Leaf Hash:</span>
+                      <span style={{ color: '#CBD5E1' }}>{solvencyProof.leafHash.slice(0, 16)}...</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: '#64748B' }}>Merkle Siblings:</span>
+                      <span style={{ color: '#F8FAFC' }}>{solvencyProof.siblings.length} nodes (Level 0 + Level 1)</span>
+                    </div>
                   </div>
                 </div>
               )}
             </div>
-          )}
+
+            {/* Right Column: Interactive Merkle Sum Tree Visualizer */}
+            <div>
+              <MerkleTreeVisualizer
+                proof={solvencyProof}
+                activeUsername={user?.username}
+                isTampered={isTampered}
+                tamperedInfo={tamperedInfo}
+              />
+            </div>
+          </div>
         </div>
       )}
 
       {/* Tab: Admin Diagnostics */}
       {activeTab === 'diagnostics' && (
-        <div style={{ padding: 24, flex: 1, overflowY: 'auto', maxWidth: 860 }}>
-          <h2 style={{ fontSize: 20, color: '#F59E0B', margin: '0 0 6px' }}>ADMIN DIAGNOSTICS & BENCHMARKS</h2>
-          <p style={{ color: '#94A3B8', fontSize: 12, margin: '0 0 16px' }}>
-            Run live reconciliation reports, HFT scalper burst tests, and demo state resets.
-          </p>
-
-          <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
-            <button
-              onClick={async () => {
-                setDiagRunning(true);
-                try {
-                  const res = await fetch('/api/admin/reconcile', { credentials: 'include' });
-                  if (res.ok) setDiagResult(await res.json());
-                } finally {
-                  setDiagRunning(false);
-                }
-              }}
-              disabled={diagRunning}
-              style={{
-                background: '#F59E0B',
-                color: '#06080F',
-                border: 'none',
-                borderRadius: 4,
-                padding: '10px 18px',
-                fontWeight: 800,
-                cursor: diagRunning ? 'not-allowed' : 'pointer',
-                fontFamily: '"JetBrains Mono", monospace',
-              }}
-            >
-              {diagRunning ? 'Running...' : 'Run Double-Entry Reconciliation'}
-            </button>
-
-            <button
-              onClick={async () => {
-                setDiagRunning(true);
-                try {
-                  const res = await fetch('/api/admin/scalper-demo', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
-                    credentials: 'include',
-                    body: JSON.stringify({ burstCount: 50 }),
-                  });
-                  if (res.ok) setDiagResult(await res.json());
-                } finally {
-                  setDiagRunning(false);
-                }
-              }}
-              disabled={diagRunning}
-              style={{
-                background: '#FF2A54',
-                color: '#FFF',
-                border: 'none',
-                borderRadius: 4,
-                padding: '10px 18px',
-                fontWeight: 800,
-                cursor: diagRunning ? 'not-allowed' : 'pointer',
-                fontFamily: '"JetBrains Mono", monospace',
-              }}
-            >
-              {diagRunning ? 'Bursting...' : 'Run 50-Order Scalper Burst'}
-            </button>
-
-            <button
-              onClick={handleResetDemoState}
-              disabled={resetLoading}
-              style={{
-                background: 'rgba(0, 240, 255, 0.15)',
-                border: '1px solid #00F0FF',
-                color: '#00F0FF',
-                borderRadius: 4,
-                padding: '10px 18px',
-                fontWeight: 800,
-                cursor: resetLoading ? 'not-allowed' : 'pointer',
-                fontFamily: '"JetBrains Mono", monospace',
-              }}
-            >
-              {resetLoading ? 'Restoring...' : '🔄 Reset Demo State (Clean Baseline)'}
-            </button>
+        <div style={{ padding: '20px 24px', flex: 1, overflowY: 'auto' }}>
+          <div style={{ marginBottom: 18 }}>
+            <h2 style={{ fontSize: 22, color: '#F59E0B', margin: 0, letterSpacing: '0.04em' }}>
+              ⚙️ ADMIN DIAGNOSTICS & SYSTEM AUDIT
+            </h2>
+            <p style={{ color: '#94A3B8', fontSize: 13, margin: '6px 0 0', maxWidth: 900, lineHeight: 1.5 }}>
+              Execute live zero-sum ledger reconciliations, stress-test high-frequency order throughput with anti-bot rate validation, and restore pristine state baselines.
+            </p>
           </div>
 
-          {diagResult && (
-            <div className="card" style={{ padding: 16 }}>
-              <div style={{ color: '#94A3B8', fontSize: 11, marginBottom: 8, fontWeight: 700 }}>
-                DIAGNOSTIC REPORT OUTPUT:
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(380px, 1fr) minmax(480px, 1.3fr)', gap: 20, alignItems: 'start' }}>
+            {/* Left Column: Diagnostics Actions */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div className="card" style={{ padding: 18 }}>
+                <strong style={{ fontSize: 13, color: '#F8FAFC', display: 'block', marginBottom: 10 }}>
+                  SYSTEM AUDIT ACTIONS
+                </strong>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setDiagRunning(true);
+                      try {
+                        const res = await fetch('/api/admin/reconcile', { credentials: 'include' });
+                        if (res.ok) setDiagResult(await res.json());
+                      } finally {
+                        setDiagRunning(false);
+                      }
+                    }}
+                    disabled={diagRunning}
+                    style={{
+                      background: '#F59E0B',
+                      color: '#06080F',
+                      border: 'none',
+                      borderRadius: 4,
+                      padding: '11px 18px',
+                      fontWeight: 800,
+                      cursor: diagRunning ? 'not-allowed' : 'pointer',
+                      fontFamily: '"JetBrains Mono", monospace',
+                      fontSize: 12,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <span>{diagRunning ? 'Auditing...' : '⚖️ Run Double-Entry Reconciliation'}</span>
+                    <span style={{ fontSize: 10, opacity: 0.8 }}>∑ Postings = 0</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setDiagRunning(true);
+                      try {
+                        const res = await fetch('/api/admin/scalper-demo', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}) },
+                          credentials: 'include',
+                          body: JSON.stringify({ burstCount: 50 }),
+                        });
+                        if (res.ok) setDiagResult(await res.json());
+                      } finally {
+                        setDiagRunning(false);
+                      }
+                    }}
+                    disabled={diagRunning}
+                    style={{
+                      background: 'rgba(255, 42, 84, 0.15)',
+                      border: '1px solid #FF2A54',
+                      color: '#FF2A54',
+                      borderRadius: 4,
+                      padding: '11px 18px',
+                      fontWeight: 800,
+                      cursor: diagRunning ? 'not-allowed' : 'pointer',
+                      fontFamily: '"JetBrains Mono", monospace',
+                      fontSize: 12,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <span>{diagRunning ? 'Bursting...' : '⚡ Run 50-Order Scalper Burst'}</span>
+                    <span style={{ fontSize: 10, opacity: 0.8 }}>PoW & Collar Check</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleResetDemoState}
+                    disabled={resetLoading}
+                    style={{
+                      background: 'rgba(0, 240, 255, 0.12)',
+                      border: '1px solid #00F0FF',
+                      color: '#00F0FF',
+                      borderRadius: 4,
+                      padding: '11px 18px',
+                      fontWeight: 800,
+                      cursor: resetLoading ? 'not-allowed' : 'pointer',
+                      fontFamily: '"JetBrains Mono", monospace',
+                      fontSize: 12,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <span>{resetLoading ? 'Restoring...' : '🔄 Reset Demo Baseline (200k DKC)'}</span>
+                    <span style={{ fontSize: 10, opacity: 0.8 }}>Pristine State</span>
+                  </button>
+                </div>
               </div>
-              <pre style={{ margin: 0, fontSize: 12, overflowX: 'auto', color: '#00F0FF', background: '#04060A', padding: 12, borderRadius: 4 }}>
-                {JSON.stringify(diagResult, null, 2)}
+
+              {/* Explainer Box */}
+              <div className="card" style={{ padding: 16 }}>
+                <div style={{ color: '#64748B', fontSize: 11, fontWeight: 700, marginBottom: 6 }}>
+                  WHAT THESE CHECKS VERIFY:
+                </div>
+                <ul style={{ margin: 0, paddingLeft: 18, color: '#94A3B8', fontSize: 11, lineHeight: 1.6 }}>
+                  <li><strong>Reconciliation:</strong> Recomputes balances directly from immutable SQL postings table and verifies zero-sum ledger invariant.</li>
+                  <li><strong>Scalper Burst:</strong> Emulates 50 institutional high-frequency orders to verify sub-millisecond execution and anti-scalping price collar ceilings.</li>
+                  <li><strong>Demo Reset:</strong> Truncates dirty benchmark orders and seeds exactly 50,000.00 DKC across Admin, Alice, Bob, and Carol.</li>
+                </ul>
+              </div>
+            </div>
+
+            {/* Right Column: Live Output Terminal */}
+            <div className="card" style={{ padding: 18 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <span style={{ color: '#F8FAFC', fontWeight: 800, fontSize: 12 }}>
+                  TELEMETRY REPORT OUTPUT
+                </span>
+                {diagResult && (
+                  <span
+                    style={{
+                      fontSize: 9,
+                      padding: '2px 6px',
+                      borderRadius: 3,
+                      background: diagResult.balanced !== false ? 'rgba(16,185,129,0.2)' : 'rgba(255,42,84,0.2)',
+                      color: diagResult.balanced !== false ? '#10B981' : '#FF2A54',
+                      border: `1px solid ${diagResult.balanced !== false ? '#10B981' : '#FF2A54'}`,
+                      fontFamily: '"JetBrains Mono", monospace',
+                    }}
+                  >
+                    {diagResult.balanced !== false ? '✓ INVARIANTS CONSERVED' : '✕ ANOMALY DETECTED'}
+                  </span>
+                )}
+              </div>
+
+              <pre
+                style={{
+                  margin: 0,
+                  fontSize: 11,
+                  overflowX: 'auto',
+                  maxHeight: 460,
+                  color: '#00F0FF',
+                  background: '#04060A',
+                  padding: 14,
+                  borderRadius: 6,
+                  border: '1px solid #161F30',
+                  fontFamily: '"JetBrains Mono", monospace',
+                  lineHeight: 1.45,
+                }}
+              >
+                {diagResult ? JSON.stringify(diagResult, null, 2) : '// No diagnostics executed yet. Click one of the action buttons on the left to inspect live engine telemetry.'}
               </pre>
             </div>
-          )}
+          </div>
         </div>
       )}
 

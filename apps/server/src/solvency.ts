@@ -62,9 +62,14 @@ export class SolvencyCoordinator {
     return this.latestSnapshot;
   }
 
+  public clearSnapshot(): void {
+    this.latestTree = null;
+    this.latestSnapshot = null;
+  }
+
   public async getProofForUser(userId: string, core: ExchangeCore): Promise<SolvencyInclusionProof | null> {
-    if (!this.latestTree || !this.latestSnapshot) {
-      // Create initial snapshot if none exists
+    if (!this.latestTree || !this.latestSnapshot || this.latestSnapshot.asOfSeq !== core.seq) {
+      // Create fresh snapshot if none exists or if state sequence evolved
       await this.createSnapshot(core);
     }
 
