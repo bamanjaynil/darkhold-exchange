@@ -12,17 +12,10 @@ import {
   verifyMerkleSumProof,
   SolvencyInclusionProof,
 } from '@darkhold/shared';
-import { BookLevel } from './components/LiquidityCanvas.js';
+import { LiquidityCanvas, BookLevel } from './components/LiquidityCanvas.js';
+import { TelemetryRibbon } from './components/TelemetryRibbon.js';
 import { LedgerInspectorDrawer } from './components/LedgerInspectorDrawer.js';
-import { ApertureStrip } from './components/ApertureStrip.js';
-import { SpatialHorizon } from './components/SpatialHorizon.js';
-import { ExecutionBlade } from './components/ExecutionBlade.js';
-import { MarketOrdersStream } from './components/MarketOrdersStream.js';
-import { VaultOverlay } from './components/VaultOverlay.js';
-import { AuctionCorridor } from './components/AuctionCorridor.js';
-import { SolvencyRadarView } from './components/SolvencyRadarView.js';
-import { EscrowCustodyView } from './components/EscrowCustodyView.js';
-import { DiagnosticsView } from './components/DiagnosticsView.js';
+import { PersonaSwitcher } from './components/PersonaSwitcher.js';
 
 type Instrument = {
   id: string;
@@ -176,8 +169,7 @@ export default function App() {
   const [myOrders, setMyOrders] = useState<OpenOrder[]>([]);
   const [orderViewMode, setOrderViewMode] = useState<'market' | 'my'>('market');
   const [holdings, setHoldings] = useState<Array<{ symbol: string; available: number; reserved: number; escrow: number }>>([]);
-  const [activeMode, setActiveMode] = useState<'horizon' | 'vault' | 'auctions' | 'custody' | 'solvency' | 'diagnostics'>('horizon');
-  const [isActionBladeOpen, setIsActionBladeOpen] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<'cockpit' | 'auctions' | 'escrows' | 'solvency' | 'diagnostics'>('cockpit');
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [csrfToken, setCsrfToken] = useState<string>('');
 
@@ -240,18 +232,7 @@ export default function App() {
   const authAbortRef = useRef<AbortController | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const selectedInstrument = instruments.find((i) => i.symbol === selectedSymbol) || instruments[0] || {
-    id: 'inst_fest_ga',
-    symbol: 'FEST-GA',
-    name: 'Festival GA Ticket',
-    faceValue: 150000,
-    collarBps: 1000,
-    tickSize: 100,
-    minQty: 1,
-    maxQtyPerOrder: 100,
-    escrowRequired: false,
-    collarCeiling: 165000,
-  };
+  const selectedInstrument = instruments.find((i) => i.symbol === selectedSymbol) || instruments[0];
   const collarCeiling = selectedInstrument
     ? calculateCollarCeiling(selectedInstrument.faceValue, selectedInstrument.collarBps)
     : 0;
@@ -365,7 +346,7 @@ export default function App() {
         }
       }
 
-      if (activeMode === 'auctions' || Math.random() < 0.25) {
+      if (activeTab === 'auctions' || Math.random() < 0.25) {
         const aucRes = await fetch('/api/auctions').catch(() => null);
         if (aucRes && aucRes.ok) {
           const aucList = await aucRes.json();
@@ -380,7 +361,7 @@ export default function App() {
     syncMarketState();
     const interval = setInterval(syncMarketState, 1000);
     return () => clearInterval(interval);
-  }, [selectedSymbol, user?.id, activeMode]);
+  }, [selectedSymbol, user?.id, activeTab]);
 
   // 2. WebSocket Connection with auto-reconnect
   useEffect(() => {
@@ -469,14 +450,12 @@ export default function App() {
   }, [selectedSymbol, user?.id]);
 
   // --- Tactical Book Sniping ---
-  const handleSelectPrice = (targetPriceMinor: number, suggestedSide: 'BUY' | 'SELL', qty?: number) => {
+  const handleSelectPrice = (targetPriceMinor: number, suggestedSide: 'BUY' | 'SELL') => {
     setPriceInput((targetPriceMinor / 100).toString());
     setSide(suggestedSide);
-    if (qty) setQtyInput(qty.toString());
     setOrderType('LIMIT');
-    setIsActionBladeOpen(true);
     setOrderMessage({
-      text: `Tactical Level loaded: ${suggestedSide} @ ${formatDKC(targetPriceMinor)}`,
+      text: `Tactical Sniping loaded: ${suggestedSide} @ ${formatDKC(targetPriceMinor)}`,
       error: false,
     });
   };
@@ -487,7 +466,6 @@ export default function App() {
     const counterSide = order.side === 'BUY' ? 'SELL' : 'BUY';
     setSide(counterSide);
     setOrderType('LIMIT');
-    setIsActionBladeOpen(true);
     setOrderMessage({
       text: `Tactical Snipe loaded: match ${order.remaining_qty} units @ ${formatDKC(order.price)} (${counterSide})`,
       error: false,
@@ -787,7 +765,7 @@ export default function App() {
       setEscrows([]);
       setDiagResult(null);
       setOrderMessage(null);
-      setActiveMode('horizon');
+      setActiveTab('cockpit');
       setLogoutLoading(false);
     }
   };
@@ -947,250 +925,1477 @@ export default function App() {
     }
   };
 
-  const handleSelectMode = (mode: 'horizon' | 'vault' | 'auctions' | 'custody' | 'solvency' | 'diagnostics') => {
-    setActiveMode(mode);
-    if (mode === 'auctions') {
-      fetch('/api/auctions', { credentials: 'include' }).then((r) => {
-        if (r.ok) r.json().then(setAuctions);
-      });
-    } else if (mode === 'custody') {
-      fetch('/api/escrows/my', { credentials: 'include' }).then((r) => {
-        if (r.ok) r.json().then(setEscrows);
-      });
-    } else if (mode === 'solvency') {
-      runSolvencyVerification();
-    }
-  };
-
-  const handleDeliverEscrow = async (escrowId: string) => {
-    try {
-      const rRes = await fetch('/api/mock-issuer/receipt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}) },
-        credentials: 'include',
-        body: JSON.stringify({ escrowId }),
-      });
-      if (rRes.ok) {
-        const { receipt } = await rRes.json();
-        const delRes = await fetch(`/api/escrows/${escrowId}/deliver`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}) },
-          credentials: 'include',
-          body: JSON.stringify({ receipt }),
-        });
-        if (delRes.ok) {
-          alert('Escrow delivered and settled successfully!');
-          fetch('/api/escrows/my', { credentials: 'include' }).then((r) => {
-            if (r.ok) r.json().then(setEscrows);
-          });
-          fetchSession();
-        } else {
-          const err = await delRes.json().catch(() => ({}));
-          alert(`Delivery failed: ${err.error || 'Server error'}`);
-        }
-      }
-    } catch (err: any) {
-      alert(`Network error: ${err.message}`);
-    }
-  };
-
-  const handleRunDiagnostics = async () => {
-    setDiagRunning(true);
-    try {
-      const res = await fetch('/api/admin/reconcile', { credentials: 'include' });
-      if (res.ok) setDiagResult(await res.json());
-    } finally {
-      setDiagRunning(false);
-    }
-  };
-
-  const handleRunScalperBurst = async () => {
-    setDiagRunning(true);
-    try {
-      const res = await fetch('/api/admin/scalper-demo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}) },
-        credentials: 'include',
-        body: JSON.stringify({ burstCount: 50 }),
-      });
-      if (res.ok) setDiagResult(await res.json());
-    } finally {
-      setDiagRunning(false);
-    }
-  };
-
-  const handleSimulateTamper = () => {
-    if (!solvencyProof) return;
-    const tamperedProof: SolvencyInclusionProof = {
-      ...solvencyProof,
-      balance: solvencyProof.balance + 1000000,
-    };
-    const verification = verifyMerkleSumProof(tamperedProof);
-    setSolvencyChecks({
-      check1: verification.valid,
-      check2: verification.calculatedTotal === tamperedProof.expectedTotal,
-      check3: false,
-    });
-    alert('Tamper Simulation: Injected 10,000 forged DKC into user leaf. Cryptographic Merkle Sum verification correctly REJECTED forged proof (Check 1 & Check 2 FAILED).');
-  };
+  // Tactical cost calculation
+  const parsedPrice = parseFloat(priceInput) || 0;
+  const parsedQty = parseInt(qtyInput, 10) || 1;
+  const estimatedCostDKC = parsedPrice * parsedQty;
+  const estimatedCostMinor = toMinorUnits(estimatedCostDKC);
+  const costPercentageOfAvailable = balance.available > 0 ? Math.min(100, Math.round((estimatedCostMinor / balance.available) * 100)) : 0;
 
   // Active displayed orders depending on view mode
   const displayedOrders = orderViewMode === 'market' ? marketOrders : myOrders;
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#040711', color: '#F8FAFC' }}>
-      {/* 1. Global Architectural Aperture Strip */}
-      <ApertureStrip
-        instruments={instruments}
-        selectedSymbol={selectedSymbol}
-        onSelectSymbol={setSelectedSymbol}
-        activeMode={activeMode}
-        onSelectMode={handleSelectMode}
-        engineSeq={engineSeq}
-        activeOrderCount={activeOrderCount}
-        wsConnected={wsConnected}
-        user={user}
-        balance={balance}
-        onSwitchPersona={handleSwitchPersona}
-        onOpenAuth={() => setShowAuthModal(true)}
-        onLogout={handleLogout}
-        logoutLoading={logoutLoading}
-        onToggleActionBlade={() => setIsActionBladeOpen((prev) => !prev)}
-        isActionBladeOpen={isActionBladeOpen}
-        liveAuctionCount={auctions.filter((a) => a.status === 'ACTIVE').length}
-        autoPilot={autoPilot}
-        onToggleAutoPilot={() => setAutoPilot((prev) => !prev)}
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#06080F', color: '#F8FAFC' }}>
+      {/* 1. Header / Navbar */}
+      <header className="navbar">
+        <div className="brand">
+          <span style={{ color: '#00F0FF', textShadow: '0 0 10px rgba(0,240,255,0.7)' }}>⚡ DARKHOLD NEXUS</span>
+          <span style={{ fontSize: 11, color: '#64748B', borderLeft: '1px solid #1E293B', paddingLeft: 8 }}>SPATIAL COCKPIT</span>
+          <span className={`badge ${wsConnected ? 'badge-ws-connected' : 'badge-ws-disconnected'}`}>
+            {wsConnected ? 'LIVE FEED (60 FPS)' : 'OFFLINE'}
+          </span>
+        </div>
+
+        {/* Center: Auto-Pilot Simulator & Persona Switcher */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          {/* Auto-Pilot Toggle Button */}
+          <button
+            onClick={() => setAutoPilot((prev) => !prev)}
+            className={autoPilot ? 'btn-autopilot-on' : 'btn-autopilot-off'}
+            style={{
+              borderRadius: 20,
+              padding: '4px 12px',
+              fontSize: 10,
+              fontWeight: 800,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontFamily: '"JetBrains Mono", monospace',
+              letterSpacing: 0.5,
+              transition: 'all 0.2s ease',
+            }}
+          >
+            <span>{autoPilot ? '⚡ AUTO-PILOT [ON]' : '⚡ AUTO-PILOT SIMULATOR [OFF]'}</span>
+          </button>
+
+          {/* 1-Click Persona Switcher */}
+          <PersonaSwitcher
+            currentUsername={user?.username}
+            onSwitch={handleSwitchPersona}
+          />
+        </div>
+
+        {/* Right: User / Auth Controls */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          {user ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div className="mono" style={{ fontSize: 12 }}>
+                <span style={{ color: '#64748B' }}>USER:</span> <strong style={{ color: '#F8FAFC' }}>{user.username}</strong>
+                <span style={{ color: '#94A3B8', fontSize: 10, marginLeft: 4 }}>({user.role})</span>
+              </div>
+              <button
+                onClick={handleLogout}
+                disabled={logoutLoading}
+                style={{
+                  background: 'transparent',
+                  border: '1px solid #1E293B',
+                  color: logoutLoading ? '#64748B' : '#FF2A54',
+                  padding: '3px 10px',
+                  borderRadius: 4,
+                  fontSize: 11,
+                  cursor: logoutLoading ? 'not-allowed' : 'pointer',
+                  fontWeight: 600,
+                  fontFamily: '"JetBrains Mono", monospace',
+                }}
+              >
+                {logoutLoading ? '...' : 'LOGOUT'}
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowAuthModal(true)}
+              style={{
+                background: '#00F0FF',
+                color: '#06080F',
+                border: 'none',
+                borderRadius: 4,
+                padding: '5px 14px',
+                fontSize: 11,
+                fontWeight: 800,
+                cursor: 'pointer',
+                fontFamily: '"JetBrains Mono", monospace',
+              }}
+            >
+              LOGIN / ACCOUNTS
+            </button>
+          )}
+        </div>
+      </header>
+
+      {/* 2. LMAX Engine & Solvency Telemetry Ribbon */}
+      <TelemetryRibbon
+        seq={engineSeq}
+        activeOrders={activeOrderCount}
+        matchLatencyUs={0.65}
+        isSolvent={true}
+        onOpenLedgerInspector={() => setIsLedgerDrawerOpen(true)}
       />
 
-      {/* 2. Primary Focal Plane */}
-      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-        {activeMode === 'horizon' && (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <SpatialHorizon
-              bids={bids}
-              asks={asks}
-              spread={spread}
-              lastPrice={trades.length > 0 ? trades[0].price : (selectedInstrument?.faceValue || null)}
-              selectedInstrument={selectedInstrument}
-              trades={trades}
-              marketOrders={marketOrders}
-              currentUserId={user?.id}
-              onSelectPrice={handleSelectPrice}
-              onCancelOrder={handleCancelOrder}
-              cancellingOrderIds={cancellingOrderIds}
-            />
-            <MarketOrdersStream
-              orders={displayedOrders}
-              currentUserId={user?.id}
-              selectedSymbol={selectedSymbol}
-              orderViewMode={orderViewMode}
-              setOrderViewMode={setOrderViewMode}
-              onMatchOrder={handleSnipeOrder}
-              onCancelOrder={handleCancelOrder}
-              cancellingOrderIds={cancellingOrderIds}
-            />
+      {/* 3. Instrument Bar & Navigation Tabs */}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          background: '#04060A',
+          borderBottom: '1px solid #161F30',
+          padding: '6px 16px',
+        }}
+      >
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: '#64748B', fontWeight: 700, fontFamily: '"JetBrains Mono", monospace' }}>
+            INSTRUMENT:
+          </span>
+          {instruments.filter((i) => !i.isBenchmark && i.symbol !== 'BENCH-X').map((inst) => {
+            const isSelected = selectedSymbol === inst.symbol;
+            return (
+              <button
+                key={inst.symbol}
+                onClick={() => {
+                  setSelectedSymbol(inst.symbol);
+                  setPriceInput((inst.faceValue / 100).toString());
+                  setOrderMessage(null);
+                }}
+                style={{
+                  background: isSelected ? 'rgba(0, 240, 255, 0.15)' : 'transparent',
+                  border: '1px solid',
+                  borderColor: isSelected ? '#00F0FF' : '#1E293B',
+                  color: isSelected ? '#00F0FF' : '#94A3B8',
+                  padding: '3px 9px',
+                  borderRadius: 4,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  fontFamily: '"JetBrains Mono", monospace',
+                }}
+              >
+                {inst.symbol} {inst.escrowRequired && '🔒'}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="nav-tabs" style={{ border: 'none', background: 'transparent' }}>
+          <button className={`nav-tab ${activeTab === 'cockpit' ? 'active' : ''}`} onClick={() => setActiveTab('cockpit')}>
+            SPATIAL COCKPIT & LADDER
+          </button>
+          <button className={`nav-tab ${activeTab === 'auctions' ? 'active' : ''}`} onClick={() => { setActiveTab('auctions'); fetch('/api/auctions').then((r) => { if (r.ok) r.json().then(setAuctions); }); }}>
+            DUTCH AUCTIONS
+          </button>
+          <button className={`nav-tab ${activeTab === 'escrows' ? 'active' : ''}`} onClick={() => { setActiveTab('escrows'); fetch('/api/escrows/my', { credentials: 'include' }).then((r) => { if (r.ok) r.json().then(setEscrows); }); }}>
+            ESCROW CUSTODY
+          </button>
+          <button className={`nav-tab ${activeTab === 'solvency' ? 'active' : ''}`} onClick={() => { setActiveTab('solvency'); runSolvencyVerification(); }}>
+            PROOF OF SOLVENCY
+          </button>
+          <button className={`nav-tab ${activeTab === 'diagnostics' ? 'active' : ''}`} onClick={() => setActiveTab('diagnostics')}>
+            ADMIN DIAGNOSTICS
+          </button>
+        </div>
+      </div>
+
+      {/* 4. Main Spatial Cockpit View */}
+      {activeTab === 'cockpit' && (
+        <div className="grid-main">
+          {/* Column 1: Tactical Execution Pod & Portfolio */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {/* Tactical Execution Pod */}
+            <div className="card">
+              <div className="card-header">
+                <span style={{ color: '#00F0FF' }}>⚡ TACTICAL EXECUTION POD</span>
+                <span style={{ fontSize: 10, color: '#64748B' }}>1-CLICK SNIPING</span>
+              </div>
+              <div className="card-body">
+                <form onSubmit={handleSubmitOrder} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {/* Side Selector (BUY vs SELL) */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => setSide('BUY')}
+                      style={{
+                        padding: '8px',
+                        background: side === 'BUY' ? 'rgba(0, 240, 255, 0.2)' : '#04060A',
+                        color: side === 'BUY' ? '#00F0FF' : '#64748B',
+                        border: `1px solid ${side === 'BUY' ? '#00F0FF' : '#1E293B'}`,
+                        borderRadius: 4,
+                        fontWeight: 800,
+                        fontFamily: '"JetBrains Mono", monospace',
+                        fontSize: 12,
+                      }}
+                    >
+                      BUY / BID
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSide('SELL')}
+                      style={{
+                        padding: '8px',
+                        background: side === 'SELL' ? 'rgba(255, 42, 84, 0.2)' : '#04060A',
+                        color: side === 'SELL' ? '#FF2A54' : '#64748B',
+                        border: `1px solid ${side === 'SELL' ? '#FF2A54' : '#1E293B'}`,
+                        borderRadius: 4,
+                        fontWeight: 800,
+                        fontFamily: '"JetBrains Mono", monospace',
+                        fontSize: 12,
+                      }}
+                    >
+                      SELL / ASK
+                    </button>
+                  </div>
+
+                  {/* Order Type & TIF */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                    <div>
+                      <label style={{ fontSize: 10, color: '#64748B', display: 'block', marginBottom: 3, fontWeight: 700 }}>
+                        ORDER TYPE
+                      </label>
+                      <select
+                        value={orderType}
+                        onChange={(e) => setOrderType(e.target.value as any)}
+                        style={{ width: '100%' }}
+                      >
+                        <option value="LIMIT">LIMIT</option>
+                        <option value="MARKET">MARKET</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 10, color: '#64748B', display: 'block', marginBottom: 3, fontWeight: 700 }}>
+                        TIME IN FORCE
+                      </label>
+                      <select
+                        value={tif}
+                        onChange={(e) => setTif(e.target.value as any)}
+                        style={{ width: '100%' }}
+                      >
+                        <option value="GTC">GTC (Resting)</option>
+                        <option value="IOC">IOC (Immediate)</option>
+                        <option value="FOK">FOK (Fill or Kill)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Price Input */}
+                  {orderType === 'LIMIT' && (
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                        <label style={{ fontSize: 10, color: '#64748B', fontWeight: 700 }}>LIMIT PRICE (DKC)</label>
+                        <span style={{ fontSize: 10, color: '#F59E0B' }}>
+                          Ceiling: {formatDKC(collarCeiling)}
+                        </span>
+                      </div>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={priceInput}
+                        onChange={(e) => setPriceInput(e.target.value)}
+                        required
+                        style={{ width: '100%', fontSize: 13, fontWeight: 700 }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Quantity Input with Quick Percentage Allocation */}
+                  <div>
+                    <label style={{ fontSize: 10, color: '#64748B', display: 'block', marginBottom: 3, fontWeight: 700 }}>
+                      QUANTITY (UNITS)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={qtyInput}
+                      onChange={(e) => setQtyInput(e.target.value)}
+                      required
+                      style={{ width: '100%', fontSize: 13, fontWeight: 700 }}
+                    />
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, marginTop: 4 }}>
+                      {[1, 5, 10, 25].map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => setQtyInput(preset.toString())}
+                          style={{
+                            background: '#04060A',
+                            border: '1px solid #1E293B',
+                            color: '#94A3B8',
+                            borderRadius: 3,
+                            padding: '2px 0',
+                            fontSize: 10,
+                            fontFamily: '"JetBrains Mono", monospace',
+                          }}
+                        >
+                          {preset}x
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* DKC Cost & Reservation Bar */}
+                  {orderType === 'LIMIT' && (
+                    <div style={{ background: '#04060A', border: '1px solid #1E293B', borderRadius: 4, padding: 8 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
+                        <span style={{ color: '#64748B' }}>Estimated Total:</span>
+                        <strong style={{ color: '#F8FAFC' }}>{formatDKC(estimatedCostMinor)}</strong>
+                      </div>
+                      {side === 'BUY' && (
+                        <div style={{ marginTop: 6 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#64748B', marginBottom: 2 }}>
+                            <span>Available Utilized</span>
+                            <span style={{ color: costPercentageOfAvailable > 100 ? '#FF2A54' : '#00F0FF' }}>
+                              {costPercentageOfAvailable}%
+                            </span>
+                          </div>
+                          <div style={{ height: 4, background: '#1E293B', borderRadius: 2, overflow: 'hidden' }}>
+                            <div
+                              style={{
+                                width: `${Math.min(100, costPercentageOfAvailable)}%`,
+                                height: '100%',
+                                background: costPercentageOfAvailable > 100 ? '#FF2A54' : '#00F0FF',
+                                transition: 'width 0.2s ease',
+                              }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Submit Button */}
+                  <button
+                    type="submit"
+                    disabled={orderSubmitting}
+                    className={side === 'BUY' ? 'btn-buy' : 'btn-sell'}
+                    style={{ marginTop: 4, cursor: orderSubmitting ? 'not-allowed' : 'pointer' }}
+                  >
+                    {orderSubmitting ? 'COMPUTING PoW & MATCHING...' : `${side} ${selectedSymbol}`}
+                  </button>
+
+                  {orderMessage && (
+                    <div
+                      style={{
+                        padding: 8,
+                        borderRadius: 4,
+                        fontSize: 11,
+                        background: orderMessage.error ? 'rgba(255, 42, 84, 0.15)' : 'rgba(0, 240, 255, 0.15)',
+                        color: orderMessage.error ? '#FF2A54' : '#00F0FF',
+                        border: `1px solid ${orderMessage.error ? '#FF2A54' : '#00F0FF'}`,
+                      }}
+                    >
+                      {orderMessage.text}
+                    </div>
+                  )}
+                </form>
+              </div>
+            </div>
+
+            {/* Wallet Balances & Holdings Card */}
+            <div className="card" style={{ flex: 1 }}>
+              <div className="card-header">
+                <span>PORTFOLIO ASSETS</span>
+                <span style={{ fontSize: 10, color: '#10B981' }}>VERIFIED SOLVENT</span>
+              </div>
+              <div className="card-body mono" style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #161F30' }}>
+                  <span style={{ color: '#64748B' }}>Available DKC:</span>
+                  <strong style={{ color: '#00F0FF' }}>{formatDKC(balance.available)}</strong>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #161F30' }}>
+                  <span style={{ color: '#64748B' }}>Reserved DKC:</span>
+                  <span style={{ color: '#F59E0B' }}>{formatDKC(balance.reserved)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #161F30' }}>
+                  <span style={{ color: '#64748B' }}>Escrow DKC:</span>
+                  <span style={{ color: '#A855F7' }}>{formatDKC(balance.escrow)}</span>
+                </div>
+
+                <div style={{ marginTop: 8, color: '#64748B', fontSize: 10, fontWeight: 700 }}>
+                  INSTRUMENT HOLDINGS:
+                </div>
+                {holdings.filter((h) => h.symbol !== 'BENCH-X').length === 0 ? (
+                  <div style={{ color: '#64748B', fontSize: 11, padding: '4px 0' }}>No assets held</div>
+                ) : (
+                  holdings.filter((h) => h.symbol !== 'BENCH-X').map((h) => (
+                    <div key={h.symbol} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
+                      <span style={{ color: '#F8FAFC' }}>{h.symbol}</span>
+                      <span>
+                        <strong style={{ color: '#10B981' }}>{h.available}</strong>
+                        {h.reserved > 0 && <span style={{ color: '#F59E0B' }}> (+{h.reserved} res)</span>}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </div>
-        )}
 
-        {activeMode === 'vault' && (
-          <VaultOverlay
-            balance={balance}
-            holdings={holdings}
-            instruments={instruments}
-            onTradeInstrument={(symbol) => {
-              setSelectedSymbol(symbol);
-              setActiveMode('horizon');
+          {/* Column 2: Centerpiece Canvas & Unified Market vs Personal Orders Table */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {/* Centerpiece Visual: Liquidity Depth & Pulse Radar */}
+            <div className="card" style={{ height: 340 }}>
+              <div className="card-header">
+                <span style={{ color: '#00F0FF' }}>🎯 LIQUIDITY GRAVITY RADAR ({selectedSymbol})</span>
+                <span style={{ fontSize: 10, color: '#64748B' }}>CLICK OPPOSING WALL TO SNIPE</span>
+              </div>
+              <div style={{ flex: 1, position: 'relative' }}>
+                <LiquidityCanvas
+                  bids={bids}
+                  asks={asks}
+                  spread={spread}
+                  lastPrice={trades[0]?.price || null}
+                  trades={trades}
+                  onSelectPrice={handleSelectPrice}
+                />
+              </div>
+            </div>
+
+            {/* Active Resting Orders Table with Market vs Personal View & 1-Click Counter-Matching */}
+            <div className="card" style={{ flex: 1 }}>
+              <div className="card-header">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {/* View Mode Toggle Pill */}
+                  <button
+                    type="button"
+                    onClick={() => setOrderViewMode('market')}
+                    style={{
+                      background: orderViewMode === 'market' ? 'rgba(0, 240, 255, 0.2)' : 'transparent',
+                      border: `1px solid ${orderViewMode === 'market' ? '#00F0FF' : '#1E293B'}`,
+                      color: orderViewMode === 'market' ? '#00F0FF' : '#94A3B8',
+                      borderRadius: 4,
+                      padding: '3px 8px',
+                      fontSize: 10,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      letterSpacing: 0.5,
+                      fontFamily: '"JetBrains Mono", monospace',
+                    }}
+                  >
+                    MARKET ORDERS ({selectedSymbol}) [{marketOrders.length}]
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrderViewMode('my')}
+                    style={{
+                      background: orderViewMode === 'my' ? 'rgba(245, 158, 11, 0.2)' : 'transparent',
+                      border: `1px solid ${orderViewMode === 'my' ? '#F59E0B' : '#1E293B'}`,
+                      color: orderViewMode === 'my' ? '#F59E0B' : '#94A3B8',
+                      borderRadius: 4,
+                      padding: '3px 8px',
+                      fontSize: 10,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      letterSpacing: 0.5,
+                      fontFamily: '"JetBrains Mono", monospace',
+                    }}
+                  >
+                    MY ORDERS [{myOrders.length}]
+                  </button>
+                </div>
+                <button
+                  onClick={syncMarketState}
+                  style={{
+                    background: 'transparent',
+                    border: '1px solid #1E293B',
+                    color: '#64748B',
+                    borderRadius: 3,
+                    padding: '2px 6px',
+                    fontSize: 10,
+                    cursor: 'pointer',
+                    fontFamily: '"JetBrains Mono", monospace',
+                  }}
+                >
+                  SYNC
+                </button>
+              </div>
+
+              <div className="card-body" style={{ padding: 0 }}>
+                {displayedOrders.length === 0 ? (
+                  <div style={{ padding: 24, textAlign: 'center', color: '#64748B', fontSize: 12 }}>
+                    {orderViewMode === 'market'
+                      ? `No active resting orders in book for ${selectedSymbol}. Click any row in the L2 ladder to submit an order.`
+                      : `You have no active resting orders on ${selectedSymbol}.`}
+                  </div>
+                ) : (
+                  <table className="ladder-table">
+                    <thead>
+                      <tr>
+                        <th>TRADER</th>
+                        <th>SIDE</th>
+                        <th>PRICE</th>
+                        <th>QTY</th>
+                        <th>REMAINING</th>
+                        <th>ACTION</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {displayedOrders.map((o) => {
+                        const isCancelling = cancellingOrderIds.has(o.id);
+                        const isMine = o.user_id === user?.id;
+                        const isAdmin = user?.role === 'admin';
+                        const trader = getTraderLabel(o.user_id);
+                        const traderColor = getTraderColor(o.user_id);
+
+                        return (
+                          <tr key={o.id} style={{ borderBottom: '1px solid #161F30' }}>
+                            <td>
+                              <span
+                                style={{
+                                  background: 'rgba(15, 23, 42, 0.7)',
+                                  border: `1px solid ${traderColor}40`,
+                                  color: traderColor,
+                                  borderRadius: 3,
+                                  padding: '1px 5px',
+                                  fontSize: 9,
+                                  fontWeight: 800,
+                                }}
+                              >
+                                {trader}
+                              </span>
+                            </td>
+                            <td style={{ color: o.side === 'BUY' ? '#00F0FF' : '#FF2A54', fontWeight: 700 }}>{o.side}</td>
+                            <td>{formatDKC(o.price)}</td>
+                            <td>{o.qty}</td>
+                            <td>{o.remaining_qty}</td>
+                            <td>
+                              {isMine || isAdmin ? (
+                                <button
+                                  onClick={() => handleCancelOrder(o.id, o.symbol)}
+                                  disabled={isCancelling}
+                                  style={{
+                                    background: isCancelling ? '#1E293B' : 'rgba(255, 42, 84, 0.15)',
+                                    color: isCancelling ? '#64748B' : '#FF2A54',
+                                    border: `1px solid ${isCancelling ? '#334155' : 'rgba(255, 42, 84, 0.4)'}`,
+                                    borderRadius: 3,
+                                    padding: '2px 8px',
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    cursor: isCancelling ? 'not-allowed' : 'pointer',
+                                    fontFamily: '"JetBrains Mono", monospace',
+                                  }}
+                                >
+                                  {isCancelling ? 'Cancelling...' : 'Cancel'}
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => handleSnipeOrder(o)}
+                                  style={{
+                                    background: 'rgba(0, 240, 255, 0.12)',
+                                    color: '#00F0FF',
+                                    border: '1px solid rgba(0, 240, 255, 0.4)',
+                                    borderRadius: 3,
+                                    padding: '2px 8px',
+                                    fontSize: 10,
+                                    fontWeight: 800,
+                                    cursor: 'pointer',
+                                    fontFamily: '"JetBrains Mono", monospace',
+                                  }}
+                                  title={`Match against ${trader}'s ${o.side} order`}
+                                >
+                                  🎯 MATCH
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Column 3: L2 Order Book Ladder & Real-Time Trade Tape */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {/* L2 Order Book Ladder */}
+            <div className="card" style={{ flex: 1 }}>
+              <div className="card-header">
+                <span>ORDER BOOK LADDER</span>
+                <span style={{ fontSize: 10, color: '#64748B' }}>1-CLICK SNIPE</span>
+              </div>
+              <div className="card-body" style={{ padding: 0 }}>
+                <table className="ladder-table">
+                  <thead>
+                    <tr>
+                      <th>PRICE (DKC)</th>
+                      <th>QTY</th>
+                      <th>TOTAL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {/* Asks displayed in reverse (lowest ask near spread) */}
+                    {asks.slice(0, 10).reverse().map((a, idx) => (
+                      <tr
+                        key={`ask-${a.price}-${idx}`}
+                        className="ask-row"
+                        onClick={() => handleSelectPrice(a.price, 'BUY')}
+                        title="Click to BUY (Snipe this ask)"
+                      >
+                        <td>{formatDKC(a.price)}</td>
+                        <td>{a.qty}</td>
+                        <td style={{ color: '#94A3B8' }}>{a.total}</td>
+                      </tr>
+                    ))}
+
+                    {/* Spread Divider */}
+                    <tr>
+                      <td colSpan={3} className="spread-row">
+                        {spread !== null ? `SPREAD: ${formatDKC(spread)}` : 'SPREAD: LOCKED'}
+                      </td>
+                    </tr>
+
+                    {/* Bids displayed descending (highest bid near spread) */}
+                    {bids.slice(0, 10).map((b, idx) => (
+                      <tr
+                        key={`bid-${b.price}-${idx}`}
+                        className="bid-row"
+                        onClick={() => handleSelectPrice(b.price, 'SELL')}
+                        title="Click to SELL (Hit this bid)"
+                      >
+                        <td>{formatDKC(b.price)}</td>
+                        <td>{b.qty}</td>
+                        <td style={{ color: '#94A3B8' }}>{b.total}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Real-Time Trade Stream Tape */}
+            <div className="card" style={{ height: 260 }}>
+              <div className="card-header">
+                <span style={{ color: '#10B981' }}>RECENT MATCHED TRADES</span>
+                <span style={{ fontSize: 10, color: '#64748B' }}>TAPE</span>
+              </div>
+              <div className="card-body" style={{ padding: 0 }}>
+                {trades.length === 0 ? (
+                  <div style={{ padding: 20, textAlign: 'center', color: '#64748B', fontSize: 11 }}>
+                    No trades executed yet
+                  </div>
+                ) : (
+                  <table className="ladder-table">
+                    <thead>
+                      <tr>
+                        <th>PRICE</th>
+                        <th>QTY</th>
+                        <th>TIME</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trades.slice(0, 20).map((t, idx) => (
+                        <tr key={t.id || idx}>
+                          <td style={{ color: t.side === 'BUY' ? '#00F0FF' : '#FF2A54', fontWeight: 600 }}>
+                            {formatDKC(t.price)}
+                          </td>
+                          <td>{t.qty}</td>
+                          <td style={{ color: '#64748B', fontSize: 10 }}>
+                            {new Date(t.created_at || Date.now()).toLocaleTimeString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tab: Dutch Auctions */}
+      {activeTab === 'auctions' && (
+        <div style={{ padding: 24, flex: 1, overflowY: 'auto' }}>
+          {/* Header & Controls */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <h2 style={{ fontSize: 20, color: '#00F0FF', margin: 0, letterSpacing: '0.05em' }}>
+                  DUTCH AUCTION TERMINAL
+                </h2>
+                <span className="badge badge-ws-connected" style={{ fontSize: 10 }}>
+                  LIVE TICKING
+                </span>
+              </div>
+              <p style={{ color: '#94A3B8', fontSize: 12, margin: '6px 0 0' }}>
+                Descending-clock asset distribution with collar ceiling guards and instant multi-unit clearing settlement.
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              {/* Filter Tabs */}
+              <div style={{ display: 'flex', background: '#090D1A', border: '1px solid #1E293B', borderRadius: 6, padding: 3, gap: 4 }}>
+                <button
+                  onClick={() => setAuctionFilter('ALL')}
+                  style={{
+                    background: auctionFilter === 'ALL' ? '#1E293B' : 'transparent',
+                    color: auctionFilter === 'ALL' ? '#00F0FF' : '#94A3B8',
+                    border: 'none',
+                    borderRadius: 4,
+                    padding: '6px 12px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ALL ({auctions.length})
+                </button>
+                <button
+                  onClick={() => setAuctionFilter('LIVE')}
+                  style={{
+                    background: auctionFilter === 'LIVE' ? '#1E293B' : 'transparent',
+                    color: auctionFilter === 'LIVE' ? '#10B981' : '#94A3B8',
+                    border: 'none',
+                    borderRadius: 4,
+                    padding: '6px 12px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ⚡ LIVE ({auctions.filter((a) => a.status === 'ACTIVE').length})
+                </button>
+                <button
+                  onClick={() => setAuctionFilter('SOLD')}
+                  style={{
+                    background: auctionFilter === 'SOLD' ? '#1E293B' : 'transparent',
+                    color: auctionFilter === 'SOLD' ? '#F59E0B' : '#94A3B8',
+                    border: 'none',
+                    borderRadius: 4,
+                    padding: '6px 12px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ✓ CLEARED ({auctions.filter((a) => a.status === 'SOLD_OUT' || a.status === 'CANCELLED').length})
+                </button>
+              </div>
+
+              <button
+                onClick={() => {
+                  fetch('/api/auctions').then((r) => { if (r.ok) r.json().then(setAuctions); });
+                  syncMarketState();
+                }}
+                style={{
+                  background: '#0F172A',
+                  color: '#94A3B8',
+                  border: '1px solid #334155',
+                  borderRadius: 6,
+                  padding: '7px 12px',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+                title="Refresh Auctions"
+              >
+                🔄
+              </button>
+
+              <button
+                onClick={() => {
+                  if (!user) {
+                    setShowAuthModal(true);
+                    return;
+                  }
+                  setShowCreateAuctionModal(true);
+                }}
+                style={{
+                  background: 'linear-gradient(135deg, #00F0FF 0%, #0284C7 100%)',
+                  color: '#06080F',
+                  border: 'none',
+                  borderRadius: 6,
+                  padding: '8px 18px',
+                  fontWeight: 800,
+                  fontSize: 12,
+                  letterSpacing: '0.04em',
+                  cursor: 'pointer',
+                  boxShadow: '0 0 15px rgba(0, 240, 255, 0.3)',
+                }}
+              >
+                + CREATE AUCTION
+              </button>
+            </div>
+          </div>
+
+          {/* Auction Cards Grid */}
+          {(() => {
+            const filteredAuctions = auctions.filter((auc) => {
+              if (auctionFilter === 'LIVE') return auc.status === 'ACTIVE';
+              if (auctionFilter === 'SOLD') return auc.status === 'SOLD_OUT' || auc.status === 'CANCELLED';
+              return true;
+            });
+
+            if (filteredAuctions.length === 0) {
+              return (
+                <div className="card" style={{ padding: 48, textAlign: 'center', color: '#64748B' }}>
+                  <div style={{ fontSize: 32, marginBottom: 12 }}>🏛️</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#94A3B8', marginBottom: 6 }}>
+                    No {auctionFilter !== 'ALL' ? auctionFilter : ''} Dutch Auctions Found
+                  </div>
+                  <div style={{ fontSize: 12, marginBottom: 16 }}>
+                    Launch descending price auctions to distribute inventory with automated collar guards.
+                  </div>
+                  <button
+                    onClick={() => setShowCreateAuctionModal(true)}
+                    style={{
+                      background: '#00F0FF',
+                      color: '#06080F',
+                      border: 'none',
+                      borderRadius: 4,
+                      padding: '8px 16px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    + Create First Auction
+                  </button>
+                </div>
+              );
+            }
+
+            return (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 16 }}>
+                {filteredAuctions.map((auc) => {
+                  const visual = getInstrumentVisual(auc.symbol);
+                  const isSeller = user?.id === auc.sellerUserId;
+                  const selectedQty = buyQtyMap[auc.id] !== undefined ? buyQtyMap[auc.id] : 1;
+                  const currentPrice = auc.currentPrice;
+                  const totalMinor = currentPrice * selectedQty;
+                  const hasFunds = (balance.available || 0) >= totalMinor;
+
+                  const priceDiff = Math.max(1, auc.startPrice - auc.floorPrice);
+                  const currentDiff = Math.max(0, currentPrice - auc.floorPrice);
+                  const progressPct = auc.status === 'ACTIVE'
+                    ? Math.max(4, Math.min(100, (currentDiff / priceDiff) * 100))
+                    : 100;
+
+                  return (
+                    <div
+                      key={auc.id}
+                      className="card"
+                      style={{
+                        padding: 18,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 14,
+                        border: `1px solid ${visual.border}`,
+                        background: 'linear-gradient(180deg, rgba(15, 23, 42, 0.6) 0%, #060913 100%)',
+                        boxShadow: isSeller ? '0 0 20px rgba(0, 240, 255, 0.08)' : 'none',
+                        position: 'relative',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      {/* Top Header: Visual Icon + Name + Badges */}
+                      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                        <div
+                          style={{
+                            width: 50,
+                            height: 50,
+                            borderRadius: 8,
+                            background: visual.bg,
+                            border: `1px solid ${visual.border}`,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexShrink: 0,
+                          }}
+                        >
+                          {visual.svg}
+                        </div>
+
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontWeight: 800, fontSize: 16, color: '#F8FAFC', letterSpacing: '0.02em' }}>
+                              {auc.symbol}
+                            </span>
+                            {auc.status === 'ACTIVE' && (
+                              <span className="badge badge-ws-connected" style={{ fontSize: 10, padding: '3px 8px' }}>
+                                ⚡ ACTIVE DECAY
+                              </span>
+                            )}
+                            {auc.status === 'SOLD_OUT' && (
+                              <span
+                                style={{
+                                  background: 'rgba(16, 185, 129, 0.15)',
+                                  color: '#10B981',
+                                  border: '1px solid rgba(16, 185, 129, 0.4)',
+                                  borderRadius: 4,
+                                  fontSize: 10,
+                                  fontWeight: 800,
+                                  padding: '3px 8px',
+                                }}
+                              >
+                                ✓ CLEARED & SOLD OUT
+                              </span>
+                            )}
+                            {auc.status === 'CANCELLED' && (
+                              <span
+                                style={{
+                                  background: 'rgba(239, 68, 68, 0.15)',
+                                  color: '#EF4444',
+                                  border: '1px solid rgba(239, 68, 68, 0.4)',
+                                  borderRadius: 4,
+                                  fontSize: 10,
+                                  fontWeight: 800,
+                                  padding: '3px 8px',
+                                }}
+                              >
+                                ✕ CANCELLED
+                              </span>
+                            )}
+                            {auc.status === 'EXPIRED' && (
+                              <span
+                                style={{
+                                  background: 'rgba(100, 116, 139, 0.15)',
+                                  color: '#94A3B8',
+                                  border: '1px solid rgba(100, 116, 139, 0.4)',
+                                  borderRadius: 4,
+                                  fontSize: 10,
+                                  fontWeight: 800,
+                                  padding: '3px 8px',
+                                }}
+                              >
+                                ⏱ EXPIRED
+                              </span>
+                            )}
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3 }}>
+                            <span style={{ fontSize: 11, color: visual.color, fontWeight: 600 }}>{visual.tag}</span>
+                            <span style={{ fontSize: 11, color: '#475569' }}>•</span>
+                            <span style={{ fontSize: 11, color: '#64748B' }}>#{auc.id.slice(0, 12)}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Seller Badge & ID Bar */}
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          padding: '6px 10px',
+                          background: 'rgba(15, 23, 42, 0.7)',
+                          borderRadius: 4,
+                          fontSize: 11,
+                          border: '1px solid #1E293B',
+                        }}
+                      >
+                        <span style={{ color: '#64748B' }}>Seller:</span>
+                        {isSeller ? (
+                          <span
+                            style={{
+                              color: '#00F0FF',
+                              fontWeight: 800,
+                              background: 'rgba(0, 240, 255, 0.12)',
+                              padding: '2px 6px',
+                              borderRadius: 3,
+                              border: '1px solid rgba(0, 240, 255, 0.3)',
+                            }}
+                          >
+                            YOU ({user?.username.toUpperCase()})
+                          </span>
+                        ) : (
+                          <span style={{ color: getTraderColor(auc.sellerUserId), fontWeight: 700 }}>
+                            {getTraderLabel(auc.sellerUserId)}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Tri-Point Price Indicators */}
+                      <div
+                        style={{
+                          background: '#040711',
+                          border: '1px solid #1E293B',
+                          borderRadius: 6,
+                          padding: '12px 14px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 10,
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <span style={{ fontSize: 10, color: '#64748B', fontWeight: 600 }}>START CEILING</span>
+                            <span style={{ fontSize: 12, color: '#94A3B8', fontWeight: 700 }}>{formatDKC(auc.startPrice)}</span>
+                          </div>
+
+                          <div style={{ textAlign: 'center' }}>
+                            {auc.status === 'SOLD_OUT' ? (
+                              <>
+                                <span style={{ fontSize: 10, color: '#10B981', fontWeight: 800, letterSpacing: '0.04em' }}>
+                                  FINAL CLEARING PRICE (LOCKED)
+                                </span>
+                                <div style={{ fontSize: 19, color: '#10B981', fontWeight: 900, textShadow: '0 0 12px rgba(16, 185, 129, 0.4)' }}>
+                                  {formatDKC(auc.clearingPrice || auc.currentPrice)}
+                                </div>
+                              </>
+                            ) : auc.status === 'CANCELLED' ? (
+                              <>
+                                <span style={{ fontSize: 10, color: '#EF4444', fontWeight: 800 }}>PRICE AT CANCEL</span>
+                                <div style={{ fontSize: 17, color: '#EF4444', fontWeight: 800 }}>
+                                  {formatDKC(auc.clearingPrice || auc.currentPrice)}
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <span style={{ fontSize: 10, color: '#F59E0B', fontWeight: 800, letterSpacing: '0.04em' }}>
+                                  LIVE CURRENT PRICE
+                                </span>
+                                <div style={{ fontSize: 19, color: '#F59E0B', fontWeight: 900, textShadow: '0 0 12px rgba(245, 158, 11, 0.4)' }}>
+                                  {formatDKC(auc.currentPrice)}
+                                </div>
+                              </>
+                            )}
+                          </div>
+
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                            <span style={{ fontSize: 10, color: '#64748B', fontWeight: 600 }}>FLOOR MINIMUM</span>
+                            <span style={{ fontSize: 12, color: '#94A3B8', fontWeight: 700 }}>{formatDKC(auc.floorPrice)}</span>
+                          </div>
+                        </div>
+
+                        {/* Animated Visual Decay Progress Bar */}
+                        <div>
+                          <div
+                            style={{
+                              height: 6,
+                              background: '#1E293B',
+                              borderRadius: 3,
+                              overflow: 'hidden',
+                              position: 'relative',
+                            }}
+                          >
+                            <div
+                              style={{
+                                height: '100%',
+                                width: `${progressPct}%`,
+                                background: auc.status === 'SOLD_OUT'
+                                  ? '#10B981'
+                                  : auc.status === 'CANCELLED'
+                                  ? '#EF4444'
+                                  : 'linear-gradient(90deg, #F59E0B 0%, #00F0FF 100%)',
+                                borderRadius: 3,
+                                transition: 'width 0.4s ease',
+                                boxShadow: auc.status === 'ACTIVE' ? '0 0 8px rgba(0, 240, 255, 0.6)' : 'none',
+                              }}
+                            />
+                          </div>
+
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#64748B', marginTop: 5 }}>
+                            {auc.status === 'ACTIVE' ? (
+                              <>
+                                <span>📉 Decay: -{(auc.decayPerSec ? auc.decayPerSec / 100 : 1).toFixed(2)} DKC/sec</span>
+                                <span>⏱ {auc.timeRemainingSec !== undefined ? auc.timeRemainingSec : 0}s to floor</span>
+                              </>
+                            ) : auc.status === 'SOLD_OUT' ? (
+                              <span style={{ color: '#10B981', fontWeight: 700 }}>✓ Settled at clearing price. Decay stopped.</span>
+                            ) : (
+                              <span style={{ color: '#EF4444', fontWeight: 700 }}>✕ Auction stopped by seller.</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Inventory Meter */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
+                          <span style={{ color: '#64748B' }}>Available Inventory:</span>
+                          <span style={{ color: '#F8FAFC', fontWeight: 700 }}>
+                            {auc.qtyRemaining} / {auc.qtyTotal} Units
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', gap: 3 }}>
+                          {Array.from({ length: Math.min(10, auc.qtyTotal) }).map((_, idx) => {
+                            const unitThreshold = (idx + 1) * (auc.qtyTotal / Math.min(10, auc.qtyTotal));
+                            const isFilled = auc.qtyRemaining >= unitThreshold;
+                            return (
+                              <div
+                                key={idx}
+                                style={{
+                                  flex: 1,
+                                  height: 5,
+                                  borderRadius: 2,
+                                  background: isFilled ? (visual.color || '#00F0FF') : '#1E293B',
+                                  opacity: isFilled ? 1 : 0.3,
+                                }}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Buy Selector / Seller Cancel Actions */}
+                      <div style={{ marginTop: 'auto', paddingTop: 6 }}>
+                        {auc.status === 'ACTIVE' ? (
+                          isSeller ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <div style={{ fontSize: 11, color: '#64748B', textAlign: 'center' }}>
+                                (You created this auction • Self-buying disabled)
+                              </div>
+                              <button
+                                onClick={() => handleCancelAuction(auc.id)}
+                                style={{
+                                  background: 'rgba(239, 68, 68, 0.15)',
+                                  color: '#EF4444',
+                                  border: '1px solid rgba(239, 68, 68, 0.4)',
+                                  borderRadius: 5,
+                                  padding: '10px 14px',
+                                  fontWeight: 800,
+                                  fontSize: 12,
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: 6,
+                                }}
+                              >
+                                🛑 Cancel Auction & Reclaim {auc.qtyRemaining} Unit(s)
+                              </button>
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              {/* Multi-Qty Selector */}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 11, color: '#64748B', fontWeight: 700 }}>QTY:</span>
+                                <div style={{ display: 'flex', alignItems: 'center', background: '#0F172A', border: '1px solid #334155', borderRadius: 4 }}>
+                                  <button
+                                    onClick={() => setBuyQtyMap({ ...buyQtyMap, [auc.id]: Math.max(1, selectedQty - 1) })}
+                                    style={{
+                                      background: 'transparent',
+                                      color: '#94A3B8',
+                                      border: 'none',
+                                      padding: '4px 10px',
+                                      fontWeight: 800,
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    -
+                                  </button>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max={auc.qtyRemaining}
+                                    value={selectedQty}
+                                    onChange={(e) => {
+                                      const val = Math.max(1, Math.min(auc.qtyRemaining, parseInt(e.target.value, 10) || 1));
+                                      setBuyQtyMap({ ...buyQtyMap, [auc.id]: val });
+                                    }}
+                                    style={{
+                                      width: 44,
+                                      textAlign: 'center',
+                                      background: 'transparent',
+                                      color: '#F8FAFC',
+                                      border: 'none',
+                                      fontWeight: 800,
+                                      fontSize: 13,
+                                    }}
+                                  />
+                                  <button
+                                    onClick={() => setBuyQtyMap({ ...buyQtyMap, [auc.id]: Math.min(auc.qtyRemaining, selectedQty + 1) })}
+                                    style={{
+                                      background: 'transparent',
+                                      color: '#94A3B8',
+                                      border: 'none',
+                                      padding: '4px 10px',
+                                      fontWeight: 800,
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    +
+                                  </button>
+                                </div>
+
+                                <button
+                                  onClick={() => setBuyQtyMap({ ...buyQtyMap, [auc.id]: auc.qtyRemaining })}
+                                  style={{
+                                    background: '#1E293B',
+                                    color: '#00F0FF',
+                                    border: 'none',
+                                    borderRadius: 4,
+                                    padding: '4px 8px',
+                                    fontSize: 10,
+                                    fontWeight: 800,
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  MAX ({auc.qtyRemaining})
+                                </button>
+
+                                <div style={{ marginLeft: 'auto', textAlign: 'right', fontSize: 11 }}>
+                                  <span style={{ color: '#64748B' }}>Total: </span>
+                                  <strong style={{ color: '#F59E0B' }}>{formatDKC(totalMinor)}</strong>
+                                </div>
+                              </div>
+
+                              {/* Snipe Action Button */}
+                              <button
+                                onClick={() => handleBuyAuction(auc, selectedQty)}
+                                disabled={!hasFunds}
+                                style={{
+                                  background: hasFunds
+                                    ? 'linear-gradient(135deg, #10B981 0%, #059669 100%)'
+                                    : '#1E293B',
+                                  color: hasFunds ? '#06080F' : '#64748B',
+                                  border: 'none',
+                                  borderRadius: 5,
+                                  padding: '10px 14px',
+                                  fontWeight: 800,
+                                  fontSize: 12,
+                                  cursor: hasFunds ? 'pointer' : 'not-allowed',
+                                  boxShadow: hasFunds ? '0 0 15px rgba(16, 185, 129, 0.3)' : 'none',
+                                  letterSpacing: '0.03em',
+                                }}
+                              >
+                                {hasFunds ? (
+                                  `⚡ SNIPE ${selectedQty} UNIT${selectedQty > 1 ? 'S' : ''} @ ${formatDKC(totalMinor)}`
+                                ) : (
+                                  `⚠️ Insufficient DKC (Need ${formatDKC(totalMinor)})`
+                                )}
+                              </button>
+                            </div>
+                          )
+                        ) : auc.status === 'SOLD_OUT' ? (
+                          <div
+                            style={{
+                              background: 'rgba(16, 185, 129, 0.1)',
+                              border: '1px solid rgba(16, 185, 129, 0.3)',
+                              borderRadius: 5,
+                              padding: '10px',
+                              textAlign: 'center',
+                              color: '#10B981',
+                              fontWeight: 800,
+                              fontSize: 12,
+                            }}
+                          >
+                            ✓ SETTLED AT {formatDKC(auc.clearingPrice || auc.currentPrice)} (100% SOLD)
+                          </div>
+                        ) : (
+                          <div
+                            style={{
+                              background: 'rgba(239, 68, 68, 0.1)',
+                              border: '1px solid rgba(239, 68, 68, 0.3)',
+                              borderRadius: 5,
+                              padding: '10px',
+                              textAlign: 'center',
+                              color: '#EF4444',
+                              fontWeight: 800,
+                              fontSize: 12,
+                            }}
+                          >
+                            ✕ AUCTION CANCELLED
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Tab: Escrow Custody */}
+      {activeTab === 'escrows' && (
+        <div style={{ padding: 20, flex: 1, overflowY: 'auto' }}>
+          <h2 style={{ fontSize: 18, color: '#A855F7', margin: '0 0 4px' }}>ESCROW CUSTODY</h2>
+          <p style={{ color: '#94A3B8', fontSize: 12, margin: '0 0 16px' }}>
+            Two-phase delivery-versus-payment escrow with mock issuer cryptographic verification.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 14 }}>
+            {escrows.map((e) => (
+              <div key={e.id} className="card" style={{ padding: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <span style={{ fontWeight: 700, color: '#F8FAFC' }}>{e.symbol}</span>
+                  <span className="badge badge-mode">{e.status}</span>
+                </div>
+                <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
+                  <div><span style={{ color: '#64748B' }}>Qty: </span>{e.qty} units</div>
+                  <div><span style={{ color: '#64748B' }}>Locked Cash: </span>{formatDKC(e.cashMinor)}</div>
+                  <div><span style={{ color: '#64748B' }}>Buyer: </span>{e.buyerUserId}</div>
+                  <div><span style={{ color: '#64748B' }}>Seller: </span>{e.sellerUserId}</div>
+                </div>
+                {e.status === 'LOCKED' && e.sellerUserId === user?.id && (
+                  <button
+                    onClick={async () => {
+                      const rRes = await fetch('/api/mock-issuer/receipt', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
+                        credentials: 'include',
+                        body: JSON.stringify({ escrowId: e.id }),
+                      });
+                      if (rRes.ok) {
+                        const { receipt } = await rRes.json();
+                        const delRes = await fetch(`/api/escrows/${e.id}/deliver`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
+                          credentials: 'include',
+                          body: JSON.stringify({ receipt }),
+                        });
+                        if (delRes.ok) {
+                          alert('Escrow delivered and settled successfully!');
+                          fetch('/api/escrows/my', { credentials: 'include' }).then((r) => { if (r.ok) r.json().then(setEscrows); });
+                          fetchSession();
+                        }
+                      }
+                    }}
+                    style={{
+                      background: '#A855F7',
+                      color: '#FFF',
+                      border: 'none',
+                      borderRadius: 4,
+                      padding: '8px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Obtain Mock Receipt & Deliver
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Tab: Proof of Solvency */}
+      {activeTab === 'solvency' && (
+        <div style={{ padding: 20, flex: 1, overflowY: 'auto', maxWidth: 800 }}>
+          <h2 style={{ fontSize: 18, color: '#10B981', margin: '0 0 4px' }}>CRYPTOGRAPHIC PROOF OF SOLVENCY</h2>
+          <p style={{ color: '#94A3B8', fontSize: 12, margin: '0 0 16px' }}>
+            Merkle Sum Tree inclusion verification proving full asset backing without disclosing private balances.
+          </p>
+
+          <button
+            onClick={runSolvencyVerification}
+            style={{
+              background: '#10B981',
+              color: '#06080F',
+              border: 'none',
+              borderRadius: 4,
+              padding: '10px 20px',
+              fontWeight: 800,
+              cursor: 'pointer',
+              marginBottom: 16,
             }}
-            onOpenAuctionCreate={() => setShowCreateAuctionModal(true)}
-          />
-        )}
+          >
+            RUN LIVE SOLVENCY AUDIT
+          </button>
 
-        {activeMode === 'auctions' && (
-          <AuctionCorridor
-            auctions={auctions}
-            user={user}
-            balance={balance}
-            auctionFilter={auctionFilter}
-            setAuctionFilter={setAuctionFilter}
-            buyQtyMap={buyQtyMap}
-            setBuyQtyMap={setBuyQtyMap}
-            onBuyAuction={handleBuyAuction}
-            onCancelAuction={handleCancelAuction}
-            onOpenCreateModal={() => setShowCreateAuctionModal(true)}
-            onRefreshAuctions={() => {
-              fetch('/api/auctions', { credentials: 'include' }).then((r) => {
-                if (r.ok) r.json().then(setAuctions);
-              });
-            }}
-            getInstrumentVisual={getInstrumentVisual}
-            getTraderLabel={getTraderLabel}
-            getTraderColor={getTraderColor}
-          />
-        )}
+          {solvencyChecks.check1 !== null && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div className="card" style={{ padding: 14, borderLeft: `4px solid ${solvencyChecks.check1 ? '#10B981' : '#FF2A54'}` }}>
+                <strong>CHECK 1: Merkle Sum Tree Path Verification</strong>
+                <p style={{ margin: '4px 0 0', color: '#94A3B8', fontSize: 12 }}>
+                  {solvencyChecks.check1 ? '✓ PASSED: Valid mathematical path from user leaf to published root hash.' : '✗ FAILED'}
+                </p>
+              </div>
+              <div className="card" style={{ padding: 14, borderLeft: `4px solid ${solvencyChecks.check2 ? '#10B981' : '#FF2A54'}` }}>
+                <strong>CHECK 2: Total Sum Invariant Conservation</strong>
+                <p style={{ margin: '4px 0 0', color: '#94A3B8', fontSize: 12 }}>
+                  {solvencyChecks.check2 ? '✓ PASSED: Cumulative liabilities equal root sum.' : '✗ FAILED'}
+                </p>
+              </div>
+              <div className="card" style={{ padding: 14, borderLeft: `4px solid ${solvencyChecks.check3 ? '#10B981' : '#FF2A54'}` }}>
+                <strong>CHECK 3: Double-Entry Ledger Zero Balance</strong>
+                <p style={{ margin: '4px 0 0', color: '#94A3B8', fontSize: 12 }}>
+                  {solvencyChecks.check3 ? '✓ PASSED: Sum of all journal debit and credit postings equals 0 across all units.' : '✗ FAILED'}
+                </p>
+              </div>
 
-        {activeMode === 'custody' && (
-          <EscrowCustodyView
-            escrows={escrows}
-            user={user}
-            onDeliverEscrow={handleDeliverEscrow}
-            onRefreshEscrows={() => {
-              fetch('/api/escrows/my', { credentials: 'include' }).then((r) => {
-                if (r.ok) r.json().then(setEscrows);
-              });
-            }}
-          />
-        )}
+              {solvencyProof && (
+                <div className="card" style={{ padding: 14 }}>
+                  <div style={{ color: '#00F0FF', fontWeight: 700, fontSize: 12, marginBottom: 6 }}>
+                    CRYPTOGRAPHIC INCLUSION PROOF
+                  </div>
+                  <div style={{ fontSize: 11, color: '#94A3B8', fontFamily: '"JetBrains Mono", monospace' }}>
+                    <div>User ID: {solvencyProof.userId}</div>
+                    <div>Account Balance: {formatDKC(solvencyProof.balance)}</div>
+                    <div>Expected Total: {formatDKC(solvencyProof.expectedTotal)}</div>
+                    <div>Expected Root: {solvencyProof.expectedRoot}</div>
+                    <div>Merkle Siblings: {solvencyProof.siblings.length} nodes</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
-        {activeMode === 'solvency' && (
-          <SolvencyRadarView
-            user={user}
-            solvencyProof={solvencyProof}
-            solvencyChecks={solvencyChecks}
-            onRunVerification={runSolvencyVerification}
-            onSimulateTamper={handleSimulateTamper}
-          />
-        )}
+      {/* Tab: Admin Diagnostics */}
+      {activeTab === 'diagnostics' && (
+        <div style={{ padding: 20, flex: 1, overflowY: 'auto', maxWidth: 800 }}>
+          <h2 style={{ fontSize: 18, color: '#F59E0B', margin: '0 0 4px' }}>ADMIN DIAGNOSTICS & BENCHMARKS</h2>
+          <p style={{ color: '#94A3B8', fontSize: 12, margin: '0 0 16px' }}>
+            Run live reconciliation reports, HFT scalper burst tests, and demo resets.
+          </p>
 
-        {activeMode === 'diagnostics' && (
-          <DiagnosticsView
-            diagResult={diagResult}
-            diagRunning={diagRunning}
-            onRunDiagnostics={handleRunDiagnostics}
-            engineSeq={engineSeq}
-            activeOrderCount={activeOrderCount}
-            wsConnected={wsConnected}
-            isLedgerDrawerOpen={isLedgerDrawerOpen}
-            onToggleLedgerDrawer={() => setIsLedgerDrawerOpen((prev) => !prev)}
-            autoPilot={autoPilot}
-            onToggleAutoPilot={() => setAutoPilot((prev) => !prev)}
-            onRunScalperBurst={handleRunScalperBurst}
-          />
-        )}
+          <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+            <button
+              onClick={async () => {
+                setDiagRunning(true);
+                try {
+                  const res = await fetch('/api/admin/reconcile', { credentials: 'include' });
+                  if (res.ok) setDiagResult(await res.json());
+                } finally {
+                  setDiagRunning(false);
+                }
+              }}
+              disabled={diagRunning}
+              style={{
+                background: '#F59E0B',
+                color: '#06080F',
+                border: 'none',
+                borderRadius: 4,
+                padding: '8px 16px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Run Double-Entry Reconciliation
+            </button>
 
-        {/* 3. Slide-in Precision Execution Blade */}
-        <ExecutionBlade
-          isOpen={isActionBladeOpen}
-          onClose={() => setIsActionBladeOpen(false)}
-          selectedInstrument={selectedInstrument}
-          side={side}
-          setSide={setSide}
-          orderType={orderType}
-          setOrderType={setOrderType}
-          tif={tif}
-          setTif={setTif}
-          priceInput={priceInput}
-          setPriceInput={setPriceInput}
-          qtyInput={qtyInput}
-          setQtyInput={setQtyInput}
-          balance={balance}
-          userHolding={holdings.find((h) => h.symbol === selectedSymbol)?.available || 0}
-          onSubmitOrder={handleSubmitOrder}
-          submitting={orderSubmitting}
-          message={orderMessage}
-          bestBidPrice={bids.length > 0 ? bids[0].price : null}
-          bestAskPrice={asks.length > 0 ? asks[0].price : null}
-        />
-      </main>
+            <button
+              onClick={async () => {
+                setDiagRunning(true);
+                try {
+                  const res = await fetch('/api/admin/scalper-demo', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
+                    credentials: 'include',
+                    body: JSON.stringify({ burstCount: 50 }),
+                  });
+                  if (res.ok) setDiagResult(await res.json());
+                } finally {
+                  setDiagRunning(false);
+                }
+              }}
+              disabled={diagRunning}
+              style={{
+                background: '#FF2A54',
+                color: '#FFF',
+                border: 'none',
+                borderRadius: 4,
+                padding: '8px 16px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Run 50-Order Scalper Burst
+            </button>
+          </div>
+
+          {diagResult && (
+            <div className="card" style={{ padding: 14 }}>
+              <pre style={{ margin: 0, fontSize: 12, overflowX: 'auto', color: '#00F0FF' }}>
+                {JSON.stringify(diagResult, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 5. Ledger & Solvency Inspector Drawer */}
       <LedgerInspectorDrawer
