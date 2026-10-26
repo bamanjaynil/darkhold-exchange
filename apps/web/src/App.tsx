@@ -16,6 +16,7 @@ import { LiquidityCanvas, BookLevel } from './components/LiquidityCanvas.js';
 import { TelemetryRibbon } from './components/TelemetryRibbon.js';
 import { LedgerInspectorDrawer } from './components/LedgerInspectorDrawer.js';
 import { PersonaSwitcher } from './components/PersonaSwitcher.js';
+import { getInstrumentMeta } from './constants/instruments.js';
 
 type Instrument = {
   id: string;
@@ -69,91 +70,15 @@ function getTraderColor(userId?: string): string {
 }
 
 function getInstrumentVisual(symbol: string) {
-  switch (symbol) {
-    case 'FEST-GA':
-      return {
-        name: 'General Admission Pass',
-        tag: 'Cyber Ticket',
-        color: '#00F0FF',
-        bg: 'rgba(0, 240, 255, 0.08)',
-        border: 'rgba(0, 240, 255, 0.35)',
-        svg: (
-          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
-            <rect x="4" y="9" width="36" height="26" rx="4" fill="#060C18" stroke="#00F0FF" strokeWidth="1.5" />
-            <path d="M14 9V13M14 31V35" stroke="#00F0FF" strokeWidth="1.5" strokeDasharray="2 2" />
-            <circle cx="14" cy="9" r="3" fill="#0B101E" stroke="#00F0FF" strokeWidth="1.5" />
-            <circle cx="14" cy="35" r="3" fill="#0B101E" stroke="#00F0FF" strokeWidth="1.5" />
-            <line x1="20" y1="16" x2="34" y2="16" stroke="#00F0FF" strokeWidth="2" strokeLinecap="round" />
-            <line x1="20" y1="22" x2="30" y2="22" stroke="#67E8F9" strokeWidth="1.5" strokeLinecap="round" />
-            <line x1="20" y1="28" x2="26" y2="28" stroke="#94A3B8" strokeWidth="1.5" strokeLinecap="round" />
-            <rect x="7.5" y="15" width="3" height="14" fill="#00F0FF" opacity="0.7" rx="1" />
-          </svg>
-        ),
-      };
-    case 'FEST-VIP':
-      return {
-        name: 'VIP Sanctum Access Pass',
-        tag: 'Holo VIP Access',
-        color: '#F59E0B',
-        bg: 'rgba(245, 158, 11, 0.08)',
-        border: 'rgba(245, 158, 11, 0.35)',
-        svg: (
-          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
-            <polygon points="22,4 38,13 38,31 22,40 6,31 6,13" fill="#0F120A" stroke="#F59E0B" strokeWidth="1.5" />
-            <polygon points="22,10 32,16 32,28 22,34 12,28 12,16" fill="rgba(245, 158, 11, 0.12)" stroke="#10B981" strokeWidth="1.2" />
-            <path d="M16 22L20 26L28 18" stroke="#F59E0B" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-            <circle cx="22" cy="7" r="1.5" fill="#F59E0B" />
-          </svg>
-        ),
-      };
-    case 'MERCH-CLOAK':
-      return {
-        name: 'Cloak of Levitation Replica',
-        tag: 'Stealth Cloak',
-        color: '#A855F7',
-        bg: 'rgba(168, 85, 247, 0.08)',
-        border: 'rgba(168, 85, 247, 0.35)',
-        svg: (
-          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
-            <path d="M22 6C17 6 12 11 11 17C10 23 7 35 7 38H37C37 35 34 23 33 17C32 11 27 6 22 6Z" fill="#130D22" stroke="#A855F7" strokeWidth="1.5" />
-            <path d="M22 6V38" stroke="#C084FC" strokeWidth="1.2" strokeDasharray="3 3" />
-            <circle cx="22" cy="14" r="3" fill="#C084FC" />
-            <path d="M16 21C19 25 25 25 28 21" stroke="#A855F7" strokeWidth="1.8" strokeLinecap="round" />
-          </svg>
-        ),
-      };
-    case 'RELIC-AGAMOTTO':
-      return {
-        name: 'Eye of Agamotto Amulet',
-        tag: 'Soulbound / Non-Transferable',
-        color: '#EF4444',
-        bg: 'rgba(239, 68, 68, 0.08)',
-        border: 'rgba(239, 68, 68, 0.35)',
-        svg: (
-          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
-            <ellipse cx="22" cy="20" rx="16" ry="11" fill="#180A0A" stroke="#EF4444" strokeWidth="1.5" />
-            <circle cx="22" cy="20" r="6" fill="rgba(239, 68, 68, 0.25)" stroke="#F87171" strokeWidth="1.5" />
-            <circle cx="22" cy="20" r="2.5" fill="#EF4444" />
-            <rect x="17" y="27" width="10" height="7" rx="2" fill="#EF4444" />
-            <path d="M19 27V24C19 22.3 20.3 21 22 21C23.7 21 25 22.3 25 24V27" stroke="#EF4444" strokeWidth="1.5" fill="none" />
-          </svg>
-        ),
-      };
-    default:
-      return {
-        name: symbol,
-        tag: 'Standard Asset',
-        color: '#94A3B8',
-        bg: 'rgba(148, 163, 184, 0.08)',
-        border: 'rgba(148, 163, 184, 0.35)',
-        svg: (
-          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
-            <rect x="8" y="8" width="28" height="28" rx="4" fill="#0F172A" stroke="#94A3B8" strokeWidth="1.5" />
-            <circle cx="22" cy="22" r="6" stroke="#94A3B8" strokeWidth="1.5" />
-          </svg>
-        ),
-      };
-  }
+  const meta = getInstrumentMeta(symbol);
+  return {
+    name: meta.name,
+    tag: meta.category,
+    color: meta.color,
+    bg: meta.bgColor,
+    border: meta.borderColor,
+    svg: meta.badge,
+  };
 }
 
 export default function App() {
@@ -179,9 +104,10 @@ export default function App() {
   const [isLedgerDrawerOpen, setIsLedgerDrawerOpen] = useState<boolean>(false);
   const [cancellingOrderIds, setCancellingOrderIds] = useState<Set<string>>(new Set());
 
-  // Auto-Pilot Market Simulator
-  const [autoPilot, setAutoPilot] = useState<boolean>(false);
-  const autoPilotTimerRef = useRef<any>(null);
+  // Deposit / Faucet Top-Up State
+  const [showFaucetModal, setShowFaucetModal] = useState<boolean>(false);
+  const [faucetLoading, setFaucetLoading] = useState<boolean>(false);
+  const [faucetMessage, setFaucetMessage] = useState<string | null>(null);
 
   // Order Form State (Tactical Execution Pod)
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
@@ -676,65 +602,41 @@ export default function App() {
     });
   };
 
-  // --- Auto-Pilot Market Simulator ---
-  useEffect(() => {
-    if (!autoPilot) {
-      if (autoPilotTimerRef.current) {
-        clearInterval(autoPilotTimerRef.current);
-        autoPilotTimerRef.current = null;
-      }
+  // --- Faucet / Deposit Top-Up Handler ---
+  const handleTopUpDKC = async (amountDKC: number) => {
+    if (!user) {
+      setShowAuthModal(true);
       return;
     }
-
-    let tick = 0;
-    autoPilotTimerRef.current = setInterval(async () => {
-      tick++;
-      try {
-        const bestBid = bids.length > 0 ? bids[0]!.price : selectedInstrument?.faceValue || 150000;
-        const bestAsk = asks.length > 0 ? asks[0]!.price : (selectedInstrument?.faceValue || 150000) + 200;
-        const mid = Math.floor((bestBid + bestAsk) / 2);
-
-        // Every 3rd tick submit a crossing order to match
-        const shouldCross = tick % 3 === 0;
-        const autoSide: 'BUY' | 'SELL' = tick % 2 === 0 ? 'BUY' : 'SELL';
-        let autoPrice: number;
-
-        if (shouldCross) {
-          autoPrice = autoSide === 'BUY' ? bestAsk : bestBid;
-        } else {
-          autoPrice = autoSide === 'BUY' ? mid - 100 : mid + 100;
+    setFaucetLoading(true);
+    setFaucetMessage(null);
+    try {
+      const res = await fetch('/api/faucet', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ amount: amountDKC }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        if (data.balance) {
+          setBalance(data.balance);
         }
-
-        await fetch('/api/orders', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-bench-bypass': 'true',
-            ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
-          },
-          credentials: 'include',
-          body: JSON.stringify({
-            clientOrderId: `sim_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
-            symbol: selectedSymbol,
-            side: autoSide,
-            type: 'LIMIT',
-            tif: 'GTC',
-            price: autoPrice,
-            qty: 1,
-          }),
-        });
-
+        setFaucetMessage(`✓ Successfully credited +${amountDKC.toLocaleString()} DKC into available balance!`);
+        await fetchSession();
         void syncMarketState();
-      } catch {}
-    }, 400);
-
-    return () => {
-      if (autoPilotTimerRef.current) {
-        clearInterval(autoPilotTimerRef.current);
-        autoPilotTimerRef.current = null;
+      } else {
+        setFaucetMessage(`Error: ${data.error || 'Failed to top up DKC'}`);
       }
-    };
-  }, [autoPilot, bids, asks, selectedSymbol, selectedInstrument, csrfToken]);
+    } catch (err: any) {
+      setFaucetMessage(`Network error: ${err.message}`);
+    } finally {
+      setFaucetLoading(false);
+    }
+  };
 
   // --- 1-Click Persona Switcher ---
   const handleSwitchPersona = async (username: string) => {
@@ -1138,27 +1040,6 @@ export default function App() {
             <span>{resetLoading ? 'RESTORING...' : '🔄 RESET DEMO STATE'}</span>
           </button>
 
-          {/* Auto-Pilot Toggle Button */}
-          <button
-            onClick={() => setAutoPilot((prev) => !prev)}
-            className={autoPilot ? 'btn-autopilot-on' : 'btn-autopilot-off'}
-            style={{
-              borderRadius: 20,
-              padding: '4px 12px',
-              fontSize: 10,
-              fontWeight: 800,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              fontFamily: '"JetBrains Mono", monospace',
-              letterSpacing: 0.5,
-              transition: 'all 0.2s ease',
-            }}
-          >
-            <span>{autoPilot ? '⚡ AUTO-PILOT [ON]' : '⚡ AUTO-PILOT [OFF]'}</span>
-          </button>
-
           {/* 1-Click Persona Switcher */}
           <PersonaSwitcher
             currentUsername={user?.username}
@@ -1239,11 +1120,7 @@ export default function App() {
           </span>
           {instruments.filter((i) => !i.isBenchmark && i.symbol !== 'BENCH-X').map((inst) => {
             const isSelected = selectedSymbol === inst.symbol;
-            let label = inst.symbol;
-            if (inst.symbol === 'FEST-GA') label = '🎫 FEST-GA (Pass)';
-            else if (inst.symbol === 'FEST-VIP') label = '👑 FEST-VIP (VIP)';
-            else if (inst.symbol === 'MERCH-CLOAK') label = '🧥 MERCH-CLOAK';
-            else if (inst.symbol === 'RELIC-AGAMOTTO') label = '🔒 RELIC-AGAMOTTO (Soulbound)';
+            const meta = getInstrumentMeta(inst.symbol);
 
             return (
               <button
@@ -1264,9 +1141,14 @@ export default function App() {
                   fontWeight: 700,
                   fontFamily: '"JetBrains Mono", monospace',
                   cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  transition: 'all 0.15s ease',
                 }}
               >
-                {label}
+                <span>{meta.icon}</span>
+                <span>{meta.shortName}</span>
               </button>
             );
           })}
@@ -1293,6 +1175,138 @@ export default function App() {
 
       {/* 4. Main Spatial Cockpit View */}
       {activeTab === 'cockpit' && (
+        <>
+          {/* Active Product Overview Strip */}
+          {(() => {
+            const meta = getInstrumentMeta(selectedSymbol);
+            const refPriceMinor = selectedInstrument?.referencePrice || selectedInstrument?.faceValue || 150000;
+            const ceilingMinor = selectedInstrument ? calculateCollarCeiling(selectedInstrument.faceValue, selectedInstrument.collarBps) : 0;
+            const collarPct = selectedInstrument ? (selectedInstrument.collarBps / 100).toFixed(0) : '10';
+
+            return (
+              <div
+                style={{
+                  background: 'linear-gradient(90deg, rgba(15, 23, 42, 0.85) 0%, rgba(9, 13, 26, 0.95) 100%)',
+                  border: `1px solid ${meta.borderColor}`,
+                  borderRadius: 6,
+                  padding: '10px 16px',
+                  margin: '8px 12px 10px 12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 16,
+                  flexWrap: 'wrap',
+                  boxShadow: `0 0 20px ${meta.bgColor}`,
+                }}
+              >
+                {/* Left: Badge + Names + Tag */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                  <div
+                    style={{
+                      width: 44,
+                      height: 44,
+                      borderRadius: 8,
+                      background: meta.bgColor,
+                      border: `1px solid ${meta.borderColor}`,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {meta.badge}
+                  </div>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 15, fontWeight: 900, color: '#F8FAFC', letterSpacing: '0.02em' }}>
+                        {meta.name}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: 9,
+                          fontWeight: 800,
+                          padding: '2px 8px',
+                          borderRadius: 12,
+                          background: meta.bgColor,
+                          color: meta.categoryColor,
+                          border: `1px solid ${meta.borderColor}`,
+                          letterSpacing: '0.05em',
+                        }}
+                      >
+                        {meta.category}
+                      </span>
+                      <span style={{ fontSize: 11, color: '#64748B', fontFamily: '"JetBrains Mono", monospace' }}>
+                        [{selectedSymbol}]
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>
+                      {meta.description}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right: Key Financial & Compliance Stats */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 18,
+                    fontFamily: '"JetBrains Mono", monospace',
+                    fontSize: 11,
+                  }}
+                >
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ color: '#64748B', fontSize: 10 }}>REFERENCE PRICE</div>
+                    <div style={{ color: '#F8FAFC', fontWeight: 700 }}>
+                      {formatDKC(refPriceMinor)}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ color: '#64748B', fontSize: 10 }}>ANTI-SCALP CEILING</div>
+                    <div style={{ color: '#F59E0B', fontWeight: 700 }}>
+                      {ceilingMinor > 0 ? `${formatDKC(ceilingMinor)} (+${collarPct}%)` : 'N/A'}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ color: '#64748B', fontSize: 10 }}>ORDER BOOK SPREAD</div>
+                    <div style={{ color: spread !== null && spread >= 0 ? '#10B981' : '#64748B', fontWeight: 700 }}>
+                      {spread !== null ? formatDKC(spread) : 'NO CROSS'}
+                    </div>
+                  </div>
+                  {selectedInstrument?.escrowRequired && (
+                    <span
+                      style={{
+                        background: 'rgba(245, 158, 11, 0.15)',
+                        border: '1px solid rgba(245, 158, 11, 0.4)',
+                        color: '#F59E0B',
+                        padding: '4px 8px',
+                        borderRadius: 4,
+                        fontSize: 10,
+                        fontWeight: 700,
+                      }}
+                    >
+                      🛡️ ESCROW CUSTODY
+                    </span>
+                  )}
+                  {selectedInstrument?.transferable === false && (
+                    <span
+                      style={{
+                        background: 'rgba(239, 68, 68, 0.15)',
+                        border: '1px solid rgba(239, 68, 68, 0.4)',
+                        color: '#FCA5A5',
+                        padding: '4px 8px',
+                        borderRadius: 4,
+                        fontSize: 10,
+                        fontWeight: 700,
+                      }}
+                    >
+                      🔒 SOULBOUND
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
         <div className="grid-main">
           {/* Column 1: Tactical Execution Pod & Portfolio */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -1492,8 +1506,32 @@ export default function App() {
                 <span style={{ fontSize: 10, color: '#10B981' }}>VERIFIED SOLVENT</span>
               </div>
               <div className="card-body mono" style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #161F30' }}>
-                  <span style={{ color: '#64748B' }}>Available DKC:</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', borderBottom: '1px solid #161F30' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ color: '#64748B' }}>Available DKC:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowFaucetModal(true);
+                        setFaucetMessage(null);
+                      }}
+                      style={{
+                        background: 'rgba(0, 240, 255, 0.12)',
+                        border: '1px solid rgba(0, 240, 255, 0.4)',
+                        color: '#00F0FF',
+                        borderRadius: 3,
+                        padding: '1px 6px',
+                        fontSize: 9,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        fontFamily: '"JetBrains Mono", monospace',
+                        transition: 'all 0.15s ease',
+                      }}
+                      title="Deposit / Top-up DKC into Available balance via zero-sum double-entry ledger"
+                    >
+                      + TOP-UP
+                    </button>
+                  </div>
                   <strong style={{ color: '#00F0FF' }}>{formatDKC(balance.available)}</strong>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #161F30' }}>
@@ -1951,7 +1989,8 @@ export default function App() {
             </div>
           </div>
         </div>
-      )}
+      </>
+    )}
 
       {/* Tab: Dutch Auctions */}
       {activeTab === 'auctions' && (
@@ -2868,6 +2907,162 @@ export default function App() {
         onClose={() => setIsLedgerDrawerOpen(false)}
         seq={engineSeq}
       />
+
+      {/* Deposit / Faucet Top-Up Modal */}
+      {showFaucetModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.85)',
+            backdropFilter: 'blur(5px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 2100,
+          }}
+        >
+          <div
+            className="card"
+            style={{
+              width: 460,
+              padding: 24,
+              border: '1px solid rgba(0, 240, 255, 0.4)',
+              boxShadow: '0 0 35px rgba(0, 240, 255, 0.15)',
+              position: 'relative',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 24 }}>🏦</span>
+                <div>
+                  <strong style={{ fontSize: 16, color: '#00F0FF', letterSpacing: '0.04em' }}>
+                    TOP-UP WALLET (DEMO FAUCET)
+                  </strong>
+                  <div style={{ fontSize: 11, color: '#94A3B8' }}>
+                    Double-entry balance injection with zero-sum invariant check
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowFaucetModal(false)}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: '#64748B',
+                  fontSize: 18,
+                  cursor: 'pointer',
+                  padding: 4,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div
+                style={{
+                  background: '#040711',
+                  border: '1px solid #1E293B',
+                  borderRadius: 6,
+                  padding: '12px 14px',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  fontFamily: '"JetBrains Mono", monospace',
+                }}
+              >
+                <div>
+                  <div style={{ color: '#64748B', fontSize: 10 }}>CURRENT AVAILABLE DKC</div>
+                  <div style={{ color: '#00F0FF', fontSize: 18, fontWeight: 800 }}>
+                    {formatDKC(balance.available)}
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ color: '#64748B', fontSize: 10 }}>ACTIVE USER</div>
+                  <div style={{ color: '#F8FAFC', fontWeight: 700, fontSize: 13 }}>
+                    {user ? user.username.toUpperCase() : 'ANONYMOUS'}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ fontSize: 11, color: '#94A3B8', lineHeight: 1.5 }}>
+                Select an amount to mint directly into your ledger account. Each deposit creates a balanced{' '}
+                <strong style={{ color: '#F8FAFC' }}>DEPOSIT</strong> journal entry (Debit User Cash / Credit Issuer Mint) maintaining exchange solvency (∑ Postings = 0).
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+                {[1000, 5000, 25000].map((amt) => (
+                  <button
+                    key={amt}
+                    disabled={faucetLoading}
+                    onClick={() => handleTopUpDKC(amt)}
+                    style={{
+                      background: 'rgba(0, 240, 255, 0.08)',
+                      border: '1px solid rgba(0, 240, 255, 0.3)',
+                      color: '#00F0FF',
+                      borderRadius: 6,
+                      padding: '14px 8px',
+                      cursor: faucetLoading ? 'not-allowed' : 'pointer',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: 4,
+                      fontFamily: '"JetBrains Mono", monospace',
+                      transition: 'all 0.15s ease',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'rgba(0, 240, 255, 0.2)';
+                      e.currentTarget.style.borderColor = '#00F0FF';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'rgba(0, 240, 255, 0.08)';
+                      e.currentTarget.style.borderColor = 'rgba(0, 240, 255, 0.3)';
+                    }}
+                  >
+                    <span style={{ fontSize: 15, fontWeight: 900 }}>+{amt.toLocaleString()}</span>
+                    <span style={{ fontSize: 10, color: '#64748B' }}>DKC</span>
+                  </button>
+                ))}
+              </div>
+
+              {faucetMessage && (
+                <div
+                  style={{
+                    padding: '8px 12px',
+                    borderRadius: 4,
+                    fontSize: 11,
+                    fontFamily: '"JetBrains Mono", monospace',
+                    background: faucetMessage.startsWith('✓') ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                    color: faucetMessage.startsWith('✓') ? '#10B981' : '#EF4444',
+                    border: `1px solid ${faucetMessage.startsWith('✓') ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                  }}
+                >
+                  {faucetMessage}
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setShowFaucetModal(false)}
+                style={{
+                  background: '#1E293B',
+                  color: '#94A3B8',
+                  border: 'none',
+                  borderRadius: 4,
+                  padding: 10,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  fontFamily: '"JetBrains Mono", monospace',
+                }}
+              >
+                CLOSE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 6. Auth Modal */}
       {showAuthModal && (

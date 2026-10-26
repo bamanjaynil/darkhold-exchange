@@ -54,6 +54,8 @@ export function registerRoutes(
         req.url.startsWith('/api/auth/register') ||
         req.url.startsWith('/api/auth/logout') ||
         req.url.startsWith('/api/admin/reset-demo') ||
+        req.url.startsWith('/api/faucet') ||
+        req.url.startsWith('/api/wallet/faucet') ||
         req.headers['x-bench-bypass'] === 'true' ||
         config.RATE_LIMIT_PROFILE === 'bench'
       ) {
@@ -785,5 +787,162 @@ export function registerRoutes(
       [userId]
     );
     reply.send(rows);
+  });
+
+  server.post('/api/faucet', { preHandler: requireAuth }, async (req, reply) => {
+    const user = req.sessionUser!;
+    const body = (typeof req.body === 'object' && req.body !== null) ? (req.body as { amount?: number }) : {};
+    const amountDKC = Math.max(1, Math.min(100000, Number(body.amount) || 5000));
+    const amountMinor = Math.round(amountDKC * 100);
+
+    const client = await core.persistence['pool'].connect();
+    try {
+      await client.query('BEGIN');
+      const journalId = `j_faucet_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const seq = ++core.seq;
+
+      // 1. Double-entry Journal
+      await client.query(
+        `INSERT INTO journals (id, kind, ref_type, ref_id, seq, created_at)
+         VALUES ($1, 'DEPOSIT', 'FAUCET', $2, $3, NOW())`,
+        [journalId, user.id, seq]
+      );
+
+      // 2. Resolve accounts
+      const userAccountId = `acc_${user.id}_cash`;
+      const issuerAccountId = 'acc_issuer_cash';
+
+      await client.query(
+        `INSERT INTO ledger_accounts (id, owner_user_id, kind, unit, created_at)
+         VALUES ($1, $2, 'CASH', 'DKC', NOW())
+         ON CONFLICT (id) DO NOTHING`,
+        [userAccountId, user.id]
+      );
+
+      await client.query(
+        `INSERT INTO ledger_accounts (id, owner_user_id, kind, unit, created_at)
+         VALUES ($1, NULL, 'ISSUER_CASH', 'DKC', NOW())
+         ON CONFLICT (id) DO NOTHING`,
+        [issuerAccountId]
+      );
+
+      // 3. Postings: balanced zero-sum (User DR / Issuer CR)
+      await client.query(
+        `INSERT INTO postings (id, journal_id, account_id, unit, amount, seq)
+         VALUES 
+          ($1, $2, $3, 'DKC', $4, $5),
+          ($6, $2, $7, 'DKC', $8, $9)`,
+        [
+          `pst_${journalId}_1`, journalId, userAccountId, amountMinor, seq,
+          `pst_${journalId}_2`, journalId, issuerAccountId, -amountMinor, seq + 1
+        ]
+      );
+
+      // 4. Update balances table
+      await client.query(
+        `INSERT INTO balances (user_id, available, reserved, escrow, updated_at)
+         VALUES ($1, $2, 0, 0, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+           available = balances.available + EXCLUDED.available,
+           updated_at = NOW()`,
+        [user.id, amountMinor]
+      );
+
+      await client.query('COMMIT');
+
+      // 5. Update ExchangeCore RAM balance
+      const bal = core.getBalance(user.id);
+      bal.available += amountMinor;
+
+      const reconciled = core.getReconciledBalance(user.id);
+      reply.send({
+        success: true,
+        amount: amountDKC,
+        amountMinor,
+        balance: reconciled,
+        message: `Successfully deposited ${amountDKC.toLocaleString()} DKC into portfolio.`
+      });
+    } catch (err: any) {
+      await client.query('ROLLBACK');
+      reply.status(500).send({ error: err.message || 'FAUCET_FAILED' });
+    } finally {
+      client.release();
+    }
+  });
+
+  server.post('/api/wallet/faucet', { preHandler: requireAuth }, async (req, reply) => {
+    const user = req.sessionUser!;
+    const body = (typeof req.body === 'object' && req.body !== null) ? (req.body as { amount?: number }) : {};
+    const amountDKC = Math.max(1, Math.min(100000, Number(body.amount) || 5000));
+    const amountMinor = Math.round(amountDKC * 100);
+
+    const client = await core.persistence['pool'].connect();
+    try {
+      await client.query('BEGIN');
+      const journalId = `j_faucet_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const seq = ++core.seq;
+
+      await client.query(
+        `INSERT INTO journals (id, kind, ref_type, ref_id, seq, created_at)
+         VALUES ($1, 'DEPOSIT', 'FAUCET', $2, $3, NOW())`,
+        [journalId, user.id, seq]
+      );
+
+      const userAccountId = `acc_${user.id}_cash`;
+      const issuerAccountId = 'acc_issuer_cash';
+
+      await client.query(
+        `INSERT INTO ledger_accounts (id, owner_user_id, kind, unit, created_at)
+         VALUES ($1, $2, 'CASH', 'DKC', NOW())
+         ON CONFLICT (id) DO NOTHING`,
+        [userAccountId, user.id]
+      );
+
+      await client.query(
+        `INSERT INTO ledger_accounts (id, owner_user_id, kind, unit, created_at)
+         VALUES ($1, NULL, 'ISSUER_CASH', 'DKC', NOW())
+         ON CONFLICT (id) DO NOTHING`,
+        [issuerAccountId]
+      );
+
+      await client.query(
+        `INSERT INTO postings (id, journal_id, account_id, unit, amount, seq)
+         VALUES 
+          ($1, $2, $3, 'DKC', $4, $5),
+          ($6, $2, $7, 'DKC', $8, $9)`,
+        [
+          `pst_${journalId}_1`, journalId, userAccountId, amountMinor, seq,
+          `pst_${journalId}_2`, journalId, issuerAccountId, -amountMinor, seq + 1
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO balances (user_id, available, reserved, escrow, updated_at)
+         VALUES ($1, $2, 0, 0, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+           available = balances.available + EXCLUDED.available,
+           updated_at = NOW()`,
+        [user.id, amountMinor]
+      );
+
+      await client.query('COMMIT');
+
+      const bal = core.getBalance(user.id);
+      bal.available += amountMinor;
+
+      const reconciled = core.getReconciledBalance(user.id);
+      reply.send({
+        success: true,
+        amount: amountDKC,
+        amountMinor,
+        balance: reconciled,
+        message: `Successfully deposited ${amountDKC.toLocaleString()} DKC into portfolio.`
+      });
+    } catch (err: any) {
+      await client.query('ROLLBACK');
+      reply.status(500).send({ error: err.message || 'FAUCET_FAILED' });
+    } finally {
+      client.release();
+    }
   });
 }
