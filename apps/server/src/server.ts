@@ -68,8 +68,14 @@ export async function buildServer(customPool?: pg.Pool) {
     void core.dispatch({ type: 'ESCROW_SWEEP' });
   }, 10_000);
 
+  // Auction auto-expiration sweeper interval (1s tick)
+  const auctionSweepInterval = setInterval(() => {
+    void core.dispatch({ type: 'AUCTION_SWEEP' });
+  }, 1_000);
+
   server.addHook('onClose', async () => {
     clearInterval(sweepInterval);
+    clearInterval(auctionSweepInterval);
     await core.persistence.flush();
     await releaseWriterLock(pool);
     if (!customPool) {

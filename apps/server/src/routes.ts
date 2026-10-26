@@ -12,6 +12,7 @@ import { AntiBotManager } from './antibot.js';
 import { SolvencyCoordinator } from './solvency.js';
 import { generateMockIssuerReceipt, verifyEscrowReceipt } from './escrow.js';
 import { runReconciliation } from './reconciliation.js';
+import { performDemoReset } from './reset.js';
 import { config } from './config.js';
 import {
   SubmitOrderSchema,
@@ -52,6 +53,7 @@ export function registerRoutes(
         req.url.startsWith('/api/auth/login') ||
         req.url.startsWith('/api/auth/register') ||
         req.url.startsWith('/api/auth/logout') ||
+        req.url.startsWith('/api/admin/reset-demo') ||
         req.headers['x-bench-bypass'] === 'true' ||
         config.RATE_LIMIT_PROFILE === 'bench'
       ) {
@@ -119,7 +121,8 @@ export function registerRoutes(
   server.post('/api/auth/register', async (req, reply) => {
     const parsed = RegisterUserSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: 'VALIDATION_ERROR', details: parsed.error.format() });
+      const issueMsg = parsed.error.issues[0]?.message || 'VALIDATION_ERROR';
+      return reply.status(400).send({ error: issueMsg, details: parsed.error.format() });
     }
 
     try {
@@ -127,7 +130,9 @@ export function registerRoutes(
         parsed.data.username,
         parsed.data.password,
         req.ip,
-        core
+        core,
+        parsed.data.role || 'user',
+        parsed.data.profile || 'standard'
       );
 
       const bal = core.getBalance(user.id);
@@ -241,7 +246,7 @@ export function registerRoutes(
     if (!req.sessionUser) {
       return reply.status(401).send({ error: 'UNAUTHORIZED' });
     }
-    const bal = core.getBalance(req.sessionUser.id);
+    const bal = core.getReconciledBalance(req.sessionUser.id);
     reply.send({
       user: req.sessionUser,
       csrfToken: req.cookies['dk_csrf'] || '',
@@ -282,22 +287,31 @@ export function registerRoutes(
   server.get('/api/trades/:symbol', async (req, reply) => {
     const { symbol } = req.params as { symbol: string };
     const cached = core.cachedTrades.get(symbol);
-    if (cached) {
+    if (cached && cached.length > 0 && cached[0].buyerUserId) {
       return reply.send(cached);
     }
     const { rows } = await core.persistence['pool'].query(
-      `SELECT t.id, t.price, t.qty, t.is_simulated, t.created_at
+      `SELECT t.id, t.price, t.qty, t.buyer_user_id, t.seller_user_id, t.is_simulated, t.created_at,
+              bu.username AS buyer_username, su.username AS seller_username
        FROM trades t
        JOIN instruments i ON t.instrument_id = i.id
+       LEFT JOIN users bu ON t.buyer_user_id = bu.id
+       LEFT JOIN users su ON t.seller_user_id = su.id
        WHERE i.symbol = $1
        ORDER BY t.seq DESC
        LIMIT 50`,
       [symbol]
     );
     const mapped = rows.map((r: any) => ({
-      ...r,
+      id: r.id,
       price: Number(r.price),
       qty: Number(r.qty),
+      buyerUserId: r.buyer_user_id,
+      sellerUserId: r.seller_user_id,
+      buyerUsername: r.buyer_username || r.buyer_user_id,
+      sellerUsername: r.seller_username || r.seller_user_id,
+      is_simulated: r.is_simulated,
+      created_at: r.created_at,
     }));
     core.cachedTrades.set(symbol, mapped);
     reply.send(mapped);
@@ -431,7 +445,7 @@ export function registerRoutes(
   server.get('/api/orders', { preHandler: requireAuth }, getOrdersHandler);
 
   server.get('/api/balances', { preHandler: requireAuth }, async (req, reply) => {
-    const bal = core.getBalance(req.sessionUser!.id);
+    const bal = core.getReconciledBalance(req.sessionUser!.id);
     reply.send(bal);
   });
 
@@ -481,6 +495,7 @@ export function registerRoutes(
 
   server.get('/api/auctions', async (_req, reply) => {
     const now = core.clock.now();
+    core.sweepExpiredAuctionsSync(now);
     const list = Array.from(core.auctions.values()).map((auc) => {
       let currentPrice = auc.floorPrice;
       if (auc.status === 'SOLD_OUT' && auc.clearingPrice !== undefined) {
@@ -726,55 +741,45 @@ export function registerRoutes(
     });
   });
 
-  server.post('/api/admin/reset-demo', { preHandler: requireAdmin }, async (_req, reply) => {
+  server.post('/api/admin/reset-demo', async (_req, reply) => {
     if (config.MARKET_MODE === 'shared') {
       return reply.status(403).send({ error: 'RESET_FORBIDDEN_IN_SHARED_MODE' });
     }
 
-    const client = await core.persistence['pool'].connect();
     try {
-      await client.query('TRUNCATE orders, trades, escrows, auctions, journals, postings CASCADE');
+      await performDemoReset(core, core.persistence['pool']);
       reply.send({ success: true, message: 'Market state reset successfully.' });
-    } finally {
-      client.release();
+    } catch (err: any) {
+      reply.status(500).send({ error: err.message || 'RESET_FAILED' });
     }
   });
 
   // --- 8. USER WALLET & LEDGER ---
 
   server.get('/api/wallet/balances', { preHandler: requireAuth }, async (req, reply) => {
-    const bal = core.getBalance(req.sessionUser!.id);
+    const bal = core.getReconciledBalance(req.sessionUser!.id);
     reply.send(bal);
   });
 
   server.get('/api/wallet/holdings', { preHandler: requireAuth }, async (req, reply) => {
-    const userId = req.sessionUser!.id;
-    const result: Array<{ symbol: string; available: number; reserved: number; escrow: number }> = [];
-
-    for (const [key, h] of core.holdings.entries()) {
-      if (key.startsWith(`${userId}:`)) {
-        const symbol = key.split(':')[1];
-        result.push({
-          symbol,
-          available: h.available,
-          reserved: h.reserved,
-          escrow: h.escrow,
-        });
-      }
-    }
-
-    reply.send(result);
+    const holdings = core.getReconciledHoldings(req.sessionUser!.id);
+    reply.send(holdings);
   });
 
   server.get('/api/wallet/ledger', { preHandler: requireAuth }, async (req, reply) => {
     const userId = req.sessionUser!.id;
     const { rows } = await core.persistence['pool'].query(
       `SELECT j.id AS journal_id, j.kind, j.ref_type, j.ref_id, j.created_at,
-              p.id AS posting_id, p.unit, p.amount, p.seq, la.kind AS account_kind
+              p.id AS posting_id, p.unit, p.amount, p.seq, la.kind AS account_kind, la.owner_user_id
        FROM journals j
        JOIN postings p ON j.id = p.journal_id
        JOIN ledger_accounts la ON p.account_id = la.id
-       WHERE la.owner_user_id = $1
+       WHERE j.id IN (
+         SELECT DISTINCT p2.journal_id
+         FROM postings p2
+         JOIN ledger_accounts la2 ON p2.account_id = la2.id
+         WHERE la2.owner_user_id = $1
+       )
        ORDER BY p.seq DESC
        LIMIT 100`,
       [userId]

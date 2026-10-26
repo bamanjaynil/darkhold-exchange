@@ -89,10 +89,12 @@ export type MockIssuerReceiptRequestInput = z.infer<typeof MockIssuerReceiptRequ
 export const RegisterUserSchema = z.object({
   username: z
     .string()
-    .min(3)
-    .max(32)
+    .min(3, 'Username must be at least 3 characters')
+    .max(32, 'Username cannot exceed 32 characters')
     .regex(/^[a-zA-Z0-9_-]+$/, 'Username must contain only alphanumeric characters, underscores or hyphens'),
-  password: z.string().min(10, 'Password must be at least 10 characters long'),
+  password: z.string().min(6, 'Password must be at least 6 characters long'),
+  role: z.enum(['user', 'admin']).optional().default('user'),
+  profile: z.string().optional().default('standard'),
 });
 
 export type RegisterUserInput = z.infer<typeof RegisterUserSchema>;

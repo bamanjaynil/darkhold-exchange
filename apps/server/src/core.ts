@@ -69,7 +69,8 @@ export type Command =
   | { type: 'AUCTION_BUY'; auctionId: string; buyerUserId: string; qty: number; maxPrice: number; resolve: (val: any) => void; reject: (err: any) => void }
   | { type: 'AUCTION_CANCEL'; auctionId: string; userId: string; isAdmin: boolean; resolve: (val: any) => void; reject: (err: any) => void }
   | { type: 'ESCROW_DELIVER'; escrowId: string; sellerUserId: string; resolve: (val: any) => void; reject: (err: any) => void }
-  | { type: 'ESCROW_SWEEP'; resolve: (val: any) => void; reject: (err: any) => void };
+  | { type: 'ESCROW_SWEEP'; resolve: (val: any) => void; reject: (err: any) => void }
+  | { type: 'AUCTION_SWEEP'; resolve?: (val: any) => void; reject?: (err: any) => void };
 
 export class ExchangeCore {
   public readonly engine: MatchingEngine;
@@ -86,7 +87,7 @@ export class ExchangeCore {
   public readonly escrows: Map<string, CoreEscrow> = new Map();
 
   public readonly cachedL2Snapshots: Map<string, { seq: number; data: any }> = new Map();
-  public readonly cachedTrades: Map<string, Array<{ id: string; price: number; qty: number; is_simulated: boolean; created_at: string }>> = new Map();
+  public readonly cachedTrades: Map<string, Array<{ id: string; price: number; qty: number; is_simulated: boolean; created_at: string; buyerUserId?: string; sellerUserId?: string; buyerUsername?: string; sellerUsername?: string; side?: string }>> = new Map();
   private pendingBroadcastSymbols: Set<string> = new Set();
   private pendingBroadcastTrades: Map<string, MatchedTrade[]> = new Map();
   private broadcastScheduled: boolean = false;
@@ -321,6 +322,90 @@ export class ExchangeCore {
     return h;
   }
 
+  public getReconciledBalance(userId: string): UserBalance {
+    const bal = this.getBalance(userId);
+    const userOrders = this.engine.getOpenOrdersForUser(userId);
+
+    let computedReservedCash = 0;
+    for (const ord of userOrders) {
+      if (ord.side === 'BUY') {
+        computedReservedCash += ord.price * ord.remainingQty;
+      }
+    }
+
+    let computedEscrowCash = 0;
+    for (const esc of this.escrows.values()) {
+      if (esc.status === 'LOCKED' && esc.buyerUserId === userId) {
+        computedEscrowCash += esc.amount;
+      }
+    }
+
+    const totalCash = bal.available + bal.reserved + bal.escrow;
+    bal.reserved = computedReservedCash;
+    bal.escrow = computedEscrowCash;
+    bal.available = Math.max(0, totalCash - bal.reserved - bal.escrow);
+    return bal;
+  }
+
+  public getReconciledHoldings(userId: string): Array<{ symbol: string; available: number; reserved: number; escrow: number }> {
+    const catalogSymbols = ['FEST-GA', 'FEST-VIP', 'MERCH-CLOAK', 'RELIC-AGAMOTTO'];
+    const userOrders = this.engine.getOpenOrdersForUser(userId);
+
+    const reservedBySymbol: Record<string, number> = {};
+    for (const ord of userOrders) {
+      if (ord.side === 'SELL') {
+        reservedBySymbol[ord.symbol] = (reservedBySymbol[ord.symbol] || 0) + ord.remainingQty;
+      }
+    }
+
+    for (const auc of this.auctions.values()) {
+      if (auc.status === 'ACTIVE' && auc.sellerUserId === userId) {
+        reservedBySymbol[auc.symbol] = (reservedBySymbol[auc.symbol] || 0) + auc.qtyRemaining;
+      }
+    }
+
+    const escrowBySymbol: Record<string, number> = {};
+    for (const esc of this.escrows.values()) {
+      if (esc.status === 'LOCKED' && esc.sellerUserId === userId) {
+        escrowBySymbol[esc.symbol] = (escrowBySymbol[esc.symbol] || 0) + esc.qty;
+      }
+    }
+
+    const result: Array<{ symbol: string; available: number; reserved: number; escrow: number }> = [];
+    for (const symbol of catalogSymbols) {
+      const h = this.getHolding(userId, symbol);
+      const computedReserved = reservedBySymbol[symbol] || 0;
+      const computedEscrow = escrowBySymbol[symbol] || 0;
+
+      const totalUnits = h.available + h.reserved + h.escrow;
+      h.reserved = computedReserved;
+      h.escrow = computedEscrow;
+      h.available = Math.max(0, totalUnits - h.reserved - h.escrow);
+
+      result.push({
+        symbol,
+        available: h.available,
+        reserved: h.reserved,
+        escrow: h.escrow,
+      });
+    }
+
+    return result;
+  }
+
+  public sweepExpiredAuctionsSync(now: number = this.clock.now()): void {
+    let hasExpired = false;
+    for (const auc of this.auctions.values()) {
+      if (auc.status === 'ACTIVE' && now >= auc.endsAt) {
+        hasExpired = true;
+        break;
+      }
+    }
+    if (hasExpired) {
+      void this.dispatch({ type: 'AUCTION_SWEEP' });
+    }
+  }
+
   private queueHead: number = 0;
 
   public dispatch<T>(cmd: any): Promise<T> {
@@ -386,7 +471,7 @@ export class ExchangeCore {
         }
       } catch (err) {
         this.totalCommandsRejected++;
-        item.reject(err);
+        if (item.reject) item.reject(err);
       }
     }
 
@@ -1059,6 +1144,37 @@ export class ExchangeCore {
           auc.status = 'EXPIRED';
           auc.clearingPrice = auc.floorPrice;
           auc.endedAt = now;
+          const remaining = auc.qtyRemaining;
+          auc.qtyRemaining = 0;
+          if (remaining > 0) {
+            const sellerHold = this.getHolding(auc.sellerUserId, auc.symbol);
+            sellerHold.reserved = Math.max(0, sellerHold.reserved - remaining);
+            sellerHold.available += remaining;
+
+            const { journal, holdingDelta } = this.ledger.releaseAsset(
+              auc.sellerUserId,
+              auc.symbol,
+              remaining,
+              'AUCTION_EXPIRE',
+              auc.id,
+              currentSeq
+            );
+            const deltaBatch: StateDeltaBatch = {
+              commandId: `auc_expire_${auc.id}_${currentSeq}`,
+              seq: currentSeq,
+              journals: [journal],
+              balanceDeltas: [],
+              holdingDeltas: [holdingDelta],
+              upsertOrders: [],
+              newTrades: [],
+              upsertAuctions: [auc],
+              upsertEscrows: [],
+              auditEvents: [],
+              onCommit: () => {},
+              onRollback: () => {},
+            };
+            this.persistence.enqueue(deltaBatch);
+          }
           return resolve({ success: false, rejectedReason: 'AUCTION_EXPIRED' });
         }
 
@@ -1313,6 +1429,78 @@ export class ExchangeCore {
         resolve({ success: true, sweptCount });
         break;
       }
+
+      case 'AUCTION_SWEEP': {
+        const now = this.clock.now();
+        const expiredAuctions: CoreAuction[] = [];
+        const journals: any[] = [];
+        const holdingDeltas: any[] = [];
+
+        for (const auc of this.auctions.values()) {
+          if (auc.status === 'ACTIVE' && now >= auc.endsAt) {
+            auc.status = 'EXPIRED';
+            auc.clearingPrice = auc.floorPrice;
+            auc.endedAt = now;
+            expiredAuctions.push(auc);
+
+            const remaining = auc.qtyRemaining;
+            auc.qtyRemaining = 0;
+
+            if (remaining > 0) {
+              const sellerHold = this.getHolding(auc.sellerUserId, auc.symbol);
+              sellerHold.reserved = Math.max(0, sellerHold.reserved - remaining);
+              sellerHold.available += remaining;
+
+              const { journal, holdingDelta } = this.ledger.releaseAsset(
+                auc.sellerUserId,
+                auc.symbol,
+                remaining,
+                'AUCTION_EXPIRE',
+                auc.id,
+                currentSeq
+              );
+              journals.push(journal);
+              holdingDeltas.push(holdingDelta);
+            }
+
+            if (this.wsBroadcastCallback) {
+              this.wsBroadcastCallback({
+                channel: 'auctions',
+                type: 'AUCTION_EXPIRED',
+                data: {
+                  auctionId: auc.id,
+                  symbol: auc.symbol,
+                  status: 'EXPIRED',
+                  clearingPrice: auc.clearingPrice,
+                  endedAt: auc.endedAt,
+                },
+                seq: currentSeq,
+              });
+            }
+          }
+        }
+
+        if (expiredAuctions.length > 0) {
+          const deltaBatch: StateDeltaBatch = {
+            commandId: `auc_sweep_${currentSeq}`,
+            seq: currentSeq,
+            journals,
+            balanceDeltas: [],
+            holdingDeltas,
+            upsertOrders: [],
+            newTrades: [],
+            upsertAuctions: expiredAuctions,
+            upsertEscrows: [],
+            auditEvents: [],
+            onCommit: () => {},
+            onRollback: (err) => console.error('[CORE] Error persisting expired auctions:', err),
+          };
+          this.persistence.enqueue(deltaBatch);
+        }
+
+        if (resolve) resolve({ success: true, expiredCount: expiredAuctions.length });
+        break;
+      }
     }
   }
 
@@ -1334,6 +1522,9 @@ export class ExchangeCore {
           id: t.id,
           price: t.price,
           qty: t.qty,
+          buyerUserId: t.buyerUserId,
+          sellerUserId: t.sellerUserId,
+          side: t.takerSide,
           is_simulated: false,
           created_at: nowStr,
         });

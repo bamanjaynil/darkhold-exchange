@@ -86,7 +86,7 @@ export async function bootstrapCore(
   }
 }
 
-async function hydrateFromDb(core: ExchangeCore, client: pg.PoolClient): Promise<void> {
+export async function hydrateFromDb(core: ExchangeCore, client: pg.PoolClient): Promise<void> {
   // Clear existing RAM state
   core.balances.clear();
   core.holdings.clear();

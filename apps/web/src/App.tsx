@@ -219,14 +219,18 @@ export default function App() {
   const [auctionDurationSec, setAuctionDurationSec] = useState<number>(180);
   const [auctionPacePreset, setAuctionPacePreset] = useState<'slow' | 'standard' | 'blitz' | 'custom'>('slow');
   const [auctionSubmitting, setAuctionSubmitting] = useState<boolean>(false);
-  const [auctionFilter, setAuctionFilter] = useState<'ALL' | 'LIVE' | 'SOLD'>('ALL');
+  const [auctionFilter, setAuctionFilter] = useState<'LIVE' | 'SETTLED'>('LIVE');
   const [buyQtyMap, setBuyQtyMap] = useState<Record<string, number>>({});
+  const [tradeFilter, setTradeFilter] = useState<'GLOBAL' | 'MY'>('GLOBAL');
+  const [resetLoading, setResetLoading] = useState<boolean>(false);
+  const [tamperResult, setTamperResult] = useState<string | null>(null);
 
   // Auth Dialog State
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [authUsername, setAuthUsername] = useState<string>('alice');
   const [authPassword, setAuthPassword] = useState<string>('demo_darkhold_2026');
+  const [authProfile, setAuthProfile] = useState<string>('Standard Trader (with Starter Grant)');
   const [authError, setAuthError] = useState<string>('');
   const [authLoading, setAuthLoading] = useState<boolean>(false);
   const authAbortRef = useRef<AbortController | null>(null);
@@ -363,6 +367,84 @@ export default function App() {
     return () => clearInterval(interval);
   }, [selectedSymbol, user?.id, activeTab]);
 
+  // 250ms High-Precision Dutch Auction Decay & Expiration Ticker
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = Date.now();
+      setAuctions((prev) =>
+        prev.map((auc) => {
+          if (auc.status !== 'ACTIVE') return auc;
+          const endsAtMs = typeof auc.endsAt === 'number' ? auc.endsAt : new Date(auc.endsAt).getTime();
+          const startsAtMs = typeof auc.startsAt === 'number' ? auc.startsAt : new Date(auc.startsAt).getTime();
+          const remainingSec = Math.max(0, Math.floor((endsAtMs - now) / 1000));
+          if (remainingSec <= 0) {
+            return { ...auc, status: 'EXPIRED', timeRemainingSec: 0, currentPrice: auc.floorPrice };
+          }
+          const elapsed = Math.max(0, now - startsAtMs);
+          const steps = Math.floor(elapsed / (auc.stepIntervalMs || 1000));
+          const currentPrice = Math.max(auc.floorPrice, auc.startPrice - steps * (auc.stepAmount || 1));
+          return { ...auc, timeRemainingSec: remainingSec, currentPrice };
+        })
+      );
+    }, 250);
+    return () => clearInterval(timer);
+  }, []);
+
+  const handleResetDemoState = async () => {
+    if (resetLoading) return;
+    const ok = window.confirm(
+      'Reset Darkhold Exchange demo state to baseline?\n\nThis re-seeds demo accounts with 50,000.00 DKC, clean starting inventory, resting orders, and 2 live long-duration Dutch auctions.'
+    );
+    if (!ok) return;
+
+    setResetLoading(true);
+    try {
+      const res = await fetch('/api/admin/reset-demo', {
+        method: 'POST',
+        credentials: 'include',
+        headers: csrfToken ? { 'x-csrf-token': csrfToken } : {},
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        alert('✓ Market state successfully reset to pristine demo baseline!');
+        await fetchSession();
+        void syncMarketState();
+      } else {
+        alert(`Reset failed: ${data.error || 'Server error'}`);
+      }
+    } catch (err: any) {
+      alert(`Reset network error: ${err.message}`);
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const handleSimulateTamper = async () => {
+    if (!solvencyProof) {
+      await runSolvencyVerification();
+    }
+    const currentProof = solvencyProof;
+    if (!currentProof) {
+      setTamperResult('⚠ No solvency proof available to test.');
+      return;
+    }
+
+    // Maliciously tamper user liability by +100.00 DKC (10,000 minor units)
+    const tampered: SolvencyInclusionProof = {
+      ...currentProof,
+      balance: currentProof.balance + 10000,
+    };
+
+    const isTamperValid = verifyMerkleSumProof(tampered);
+    if (!isTamperValid) {
+      setTamperResult(
+        '✓ CRYPTOGRAPHIC REJECTION CONFIRMED: Merkle root mismatch! Tampering with user balance by +100.00 DKC was mathematically rejected against canonical published Merkle root hash.'
+      );
+    } else {
+      setTamperResult('⚠ Unexpected: Tampered proof passed validation.');
+    }
+  };
+
   // 2. WebSocket Connection with auto-reconnect
   useEffect(() => {
     let unmounted = false;
@@ -449,6 +531,105 @@ export default function App() {
     };
   }, [selectedSymbol, user?.id]);
 
+  // --- Universal High-Speed Order Dispatch (with Web Worker PoW) ---
+  const dispatchOrderDirect = async (params: {
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    price?: number;
+    qty: number;
+    type: string;
+    tif?: string;
+  }) => {
+    if (!user) {
+      setShowAuthModal(true);
+      return;
+    }
+
+    setOrderSubmitting(true);
+    setOrderMessage(null);
+
+    try {
+      const curInst = instruments.find((i) => i.symbol === params.symbol);
+      const ceiling = curInst ? calculateCollarCeiling(curInst.faceValue, curInst.collarBps) : 165000;
+
+      if (params.type === 'LIMIT' && params.price && params.price > ceiling) {
+        setOrderMessage({ text: `Price exceeds anti-scalping collar ceiling of ${formatDKC(ceiling)}`, error: true });
+        setOrderSubmitting(false);
+        return;
+      }
+
+      // Fetch PoW challenge
+      const chalRes = await fetch('/api/pow/challenge');
+      if (!chalRes.ok) {
+        throw new Error('Failed to obtain PoW challenge from server');
+      }
+      const challenge = await chalRes.json();
+
+      // Solve in Web Worker
+      const worker = new Worker(new URL('./pow-worker.ts', import.meta.url), { type: 'module' });
+      worker.onerror = (we) => {
+        worker.terminate();
+        setOrderSubmitting(false);
+        setOrderMessage({ text: 'PoW Worker error: ' + (we.message || 'Worker failure'), error: true });
+      };
+
+      worker.postMessage({ seed: challenge.seed, difficultyBits: challenge.difficultyBits });
+
+      worker.onmessage = async (we) => {
+        const { nonce } = we.data;
+        worker.terminate();
+
+        try {
+          const orderPayload = {
+            clientOrderId: `web_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+            symbol: params.symbol,
+            side: params.side,
+            type: params.type,
+            tif: params.tif || 'GTC',
+            price: params.price,
+            qty: params.qty,
+            pow: {
+              challengeId: challenge.challengeId,
+              nonce,
+            },
+          };
+
+          const res = await fetch('/api/orders', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-csrf-token': csrfToken,
+            },
+            credentials: 'include',
+            body: JSON.stringify(orderPayload),
+          });
+
+          const data = await res.json().catch(() => ({}));
+          if (res.ok) {
+            const tradeCount = data.trades?.length || 0;
+            setOrderMessage({
+              text: tradeCount > 0
+                ? `⚡ Instant Match SUCCESS: Executed ${tradeCount} trade(s) on ${params.symbol}!`
+                : `✓ Order ${data.restingOrder ? 'resting in book' : 'executed'} successfully! Seq #${data.seq}`,
+              error: false,
+            });
+            await fetchSession();
+            void syncMarketState();
+          } else {
+            setOrderMessage({ text: data.error || 'Order rejected by exchange', error: true });
+          }
+        } catch (err: any) {
+          setOrderMessage({ text: err.message || 'Network error submitting order', error: true });
+        } finally {
+          setOrderSubmitting(false);
+        }
+      };
+    } catch (err: any) {
+      setOrderSubmitting(false);
+      setOrderMessage({ text: err.message || 'Error submitting order', error: true });
+    }
+  };
+
   // --- Tactical Book Sniping ---
   const handleSelectPrice = (targetPriceMinor: number, suggestedSide: 'BUY' | 'SELL') => {
     setPriceInput((targetPriceMinor / 100).toString());
@@ -460,15 +641,38 @@ export default function App() {
     });
   };
 
-  const handleSnipeOrder = (order: OpenOrder) => {
+  const handleSnipeOrder = async (order: OpenOrder) => {
+    const counterSide = order.side === 'BUY' ? 'SELL' : 'BUY';
     setPriceInput((order.price / 100).toString());
     setQtyInput(order.remaining_qty.toString());
-    const counterSide = order.side === 'BUY' ? 'SELL' : 'BUY';
     setSide(counterSide);
     setOrderType('LIMIT');
     setOrderMessage({
-      text: `Tactical Snipe loaded: match ${order.remaining_qty} units @ ${formatDKC(order.price)} (${counterSide})`,
+      text: `⚡ Dispatching counter-order: ${counterSide} ${order.remaining_qty}x @ ${formatDKC(order.price)}...`,
       error: false,
+    });
+    await dispatchOrderDirect({
+      symbol: order.symbol,
+      side: counterSide,
+      price: order.price,
+      qty: order.remaining_qty,
+      type: 'LIMIT',
+      tif: 'IOC',
+    });
+  };
+
+  const handleTestProtocolRejection = async () => {
+    setOrderMessage({
+      text: '🛡️ Testing protocol invariant: Submitting illegal buy on soulbound asset RELIC-AGAMOTTO...',
+      error: false,
+    });
+    await dispatchOrderDirect({
+      symbol: 'RELIC-AGAMOTTO',
+      side: 'BUY',
+      price: 500000,
+      qty: 1,
+      type: 'LIMIT',
+      tif: 'GTC',
     });
   };
 
@@ -558,91 +762,16 @@ export default function App() {
   // 3. Order Placement with Web Worker PoW
   const handleSubmitOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user) {
-      setShowAuthModal(true);
-      return;
-    }
-
-    setOrderSubmitting(true);
-    setOrderMessage(null);
-
-    try {
-      const priceMinor = orderType === 'LIMIT' ? toMinorUnits(parseFloat(priceInput)) : undefined;
-      const qty = parseInt(qtyInput, 10);
-
-      // Client pre-validation
-      if (orderType === 'LIMIT' && priceMinor && priceMinor > collarCeiling) {
-        setOrderMessage({ text: `Price exceeds anti-scalping collar ceiling of ${formatDKC(collarCeiling)}`, error: true });
-        setOrderSubmitting(false);
-        return;
-      }
-
-      // Fetch PoW challenge
-      const chalRes = await fetch('/api/pow/challenge');
-      if (!chalRes.ok) {
-        throw new Error('Failed to obtain PoW challenge from server');
-      }
-      const challenge = await chalRes.json();
-
-      // Solve in Web Worker
-      const worker = new Worker(new URL('./pow-worker.ts', import.meta.url), { type: 'module' });
-      worker.onerror = (we) => {
-        worker.terminate();
-        setOrderSubmitting(false);
-        setOrderMessage({ text: 'PoW Worker error: ' + (we.message || 'Worker failure'), error: true });
-      };
-
-      worker.postMessage({ seed: challenge.seed, difficultyBits: challenge.difficultyBits });
-
-      worker.onmessage = async (we) => {
-        const { nonce } = we.data;
-        worker.terminate();
-
-        try {
-          const orderPayload = {
-            clientOrderId: `web_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
-            symbol: selectedSymbol,
-            side,
-            type: orderType,
-            tif,
-            price: priceMinor,
-            qty,
-            pow: {
-              challengeId: challenge.challengeId,
-              nonce,
-            },
-          };
-
-          const res = await fetch('/api/orders', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-csrf-token': csrfToken,
-            },
-            credentials: 'include',
-            body: JSON.stringify(orderPayload),
-          });
-
-          const data = await res.json().catch(() => ({}));
-          if (res.ok) {
-            setOrderMessage({
-              text: `Order ${data.restingOrder ? 'resting in book' : 'executed'} successfully! Seq #${data.seq}`,
-              error: false,
-            });
-            void syncMarketState();
-          } else {
-            setOrderMessage({ text: data.error || 'Order rejected by exchange', error: true });
-          }
-        } catch (err: any) {
-          setOrderMessage({ text: err.message || 'Network error submitting order', error: true });
-        } finally {
-          setOrderSubmitting(false);
-        }
-      };
-    } catch (err: any) {
-      setOrderSubmitting(false);
-      setOrderMessage({ text: err.message || 'Error submitting order', error: true });
-    }
+    const priceMinor = orderType === 'LIMIT' ? toMinorUnits(parseFloat(priceInput)) : undefined;
+    const qty = parseInt(qtyInput, 10);
+    await dispatchOrderDirect({
+      symbol: selectedSymbol,
+      side,
+      price: priceMinor,
+      qty,
+      type: orderType,
+      tif,
+    });
   };
 
   // --- Authoritative Non-Blocking Order Cancellation ---
@@ -688,6 +817,37 @@ export default function App() {
     setAuthLoading(false);
   };
 
+  const handleOneClickLogin = async (username: string, pass: string) => {
+    setAuthUsername(username);
+    setAuthPassword(pass);
+    setAuthMode('login');
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ username, password: pass }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setUser(data.user);
+        if (data.balance) setBalance(data.balance);
+        if (data.csrfToken) setCsrfToken(data.csrfToken);
+        setShowAuthModal(false);
+        await fetchSession();
+        void syncMarketState();
+      } else {
+        setAuthError(data.error || 'Login failed');
+      }
+    } catch (err: any) {
+      setAuthError(err.message || 'Login failed');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     if (authLoading) return;
@@ -702,6 +862,10 @@ export default function App() {
     const timeoutId = setTimeout(() => controller.abort(), 8000);
 
     const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
+    const payload =
+      authMode === 'login'
+        ? { username: authUsername.trim(), password: authPassword }
+        : { username: authUsername.trim(), password: authPassword, role: 'user', profile: authProfile };
 
     try {
       const res = await fetch(endpoint, {
@@ -709,7 +873,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         signal: controller.signal,
-        body: JSON.stringify({ username: authUsername.trim(), password: authPassword }),
+        body: JSON.stringify(payload),
       });
       clearTimeout(timeoutId);
 
@@ -947,8 +1111,33 @@ export default function App() {
           </span>
         </div>
 
-        {/* Center: Auto-Pilot Simulator & Persona Switcher */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        {/* Center: Auto-Pilot Simulator, Persona Switcher & Demo Reset */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {/* 🔄 Reset Demo State Button */}
+          <button
+            onClick={handleResetDemoState}
+            disabled={resetLoading}
+            style={{
+              background: 'rgba(245, 158, 11, 0.15)',
+              border: '1px solid #F59E0B',
+              color: '#F59E0B',
+              borderRadius: 20,
+              padding: '4px 12px',
+              fontSize: 10,
+              fontWeight: 800,
+              cursor: resetLoading ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontFamily: '"JetBrains Mono", monospace',
+              letterSpacing: 0.5,
+              transition: 'all 0.2s ease',
+            }}
+            title="Reset exchange to clean baseline with 50,000 DKC balances and fresh auctions"
+          >
+            <span>{resetLoading ? 'RESTORING...' : '🔄 RESET DEMO STATE'}</span>
+          </button>
+
           {/* Auto-Pilot Toggle Button */}
           <button
             onClick={() => setAutoPilot((prev) => !prev)}
@@ -967,7 +1156,7 @@ export default function App() {
               transition: 'all 0.2s ease',
             }}
           >
-            <span>{autoPilot ? '⚡ AUTO-PILOT [ON]' : '⚡ AUTO-PILOT SIMULATOR [OFF]'}</span>
+            <span>{autoPilot ? '⚡ AUTO-PILOT [ON]' : '⚡ AUTO-PILOT [OFF]'}</span>
           </button>
 
           {/* 1-Click Persona Switcher */}
@@ -1050,6 +1239,12 @@ export default function App() {
           </span>
           {instruments.filter((i) => !i.isBenchmark && i.symbol !== 'BENCH-X').map((inst) => {
             const isSelected = selectedSymbol === inst.symbol;
+            let label = inst.symbol;
+            if (inst.symbol === 'FEST-GA') label = '🎫 FEST-GA (Pass)';
+            else if (inst.symbol === 'FEST-VIP') label = '👑 FEST-VIP (VIP)';
+            else if (inst.symbol === 'MERCH-CLOAK') label = '🧥 MERCH-CLOAK';
+            else if (inst.symbol === 'RELIC-AGAMOTTO') label = '🔒 RELIC-AGAMOTTO (Soulbound)';
+
             return (
               <button
                 key={inst.symbol}
@@ -1063,14 +1258,15 @@ export default function App() {
                   border: '1px solid',
                   borderColor: isSelected ? '#00F0FF' : '#1E293B',
                   color: isSelected ? '#00F0FF' : '#94A3B8',
-                  padding: '3px 9px',
+                  padding: '4px 10px',
                   borderRadius: 4,
                   fontSize: 11,
                   fontWeight: 700,
                   fontFamily: '"JetBrains Mono", monospace',
+                  cursor: 'pointer',
                 }}
               >
-                {inst.symbol} {inst.escrowRequired && '🔒'}
+                {label}
               </button>
             );
           })}
@@ -1332,12 +1528,92 @@ export default function App() {
           {/* Column 2: Centerpiece Canvas & Unified Market vs Personal Orders Table */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {/* Centerpiece Visual: Liquidity Depth & Pulse Radar */}
-            <div className="card" style={{ height: 340 }}>
+            <div className="card" style={{ display: 'flex', flexDirection: 'column' }}>
               <div className="card-header">
                 <span style={{ color: '#00F0FF' }}>🎯 LIQUIDITY GRAVITY RADAR ({selectedSymbol})</span>
                 <span style={{ fontSize: 10, color: '#64748B' }}>CLICK OPPOSING WALL TO SNIPE</span>
               </div>
-              <div style={{ flex: 1, position: 'relative' }}>
+
+              {/* Instrument Info Strip */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '6px 12px',
+                  background: 'rgba(15, 23, 42, 0.65)',
+                  borderBottom: '1px solid #161F30',
+                  fontSize: 10,
+                  fontFamily: '"JetBrains Mono", monospace',
+                  flexWrap: 'wrap',
+                  gap: 8,
+                }}
+              >
+                <div>
+                  <span style={{ color: '#64748B' }}>REF PRICE: </span>
+                  <span style={{ color: '#F8FAFC', fontWeight: 700 }}>
+                    {formatDKC(selectedInstrument?.faceValue || 150000)}
+                  </span>
+                </div>
+                <div>
+                  <span style={{ color: '#64748B' }}>COLLAR CAP: </span>
+                  <span style={{ color: '#F59E0B', fontWeight: 700 }}>
+                    {formatDKC(collarCeiling)} (+10%)
+                  </span>
+                </div>
+                <div>
+                  <span style={{ color: '#64748B' }}>TRANSFER: </span>
+                  <span style={{ color: selectedInstrument?.escrowRequired ? '#FF2A54' : '#10B981', fontWeight: 700 }}>
+                    {selectedInstrument?.escrowRequired ? '🔒 LOCKED / SOULBOUND' : '✓ UNRESTRICTED'}
+                  </span>
+                </div>
+                <div>
+                  <span style={{ color: '#64748B' }}>SPREAD: </span>
+                  <span style={{ color: '#00F0FF', fontWeight: 700 }}>
+                    {spread !== null ? formatDKC(spread) : 'LOCKED'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Soulbound Asset Warning Banner */}
+              {selectedSymbol === 'RELIC-AGAMOTTO' && (
+                <div
+                  style={{
+                    background: 'rgba(255, 42, 84, 0.12)',
+                    borderBottom: '1px solid rgba(255, 42, 84, 0.35)',
+                    padding: '6px 12px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: 10,
+                    fontFamily: '"JetBrains Mono", monospace',
+                  }}
+                >
+                  <span style={{ color: '#FF2A54', fontWeight: 700 }}>
+                    🛡️ SOULBOUND ASSET — SECONDARY TRADING PERMANENTLY LOCKED BY SMART CONTRACT PROTOCOL
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleTestProtocolRejection}
+                    disabled={orderSubmitting}
+                    style={{
+                      background: '#FF2A54',
+                      color: '#FFFFFF',
+                      border: 'none',
+                      borderRadius: 3,
+                      padding: '2px 8px',
+                      fontSize: 9,
+                      fontWeight: 800,
+                      cursor: orderSubmitting ? 'not-allowed' : 'pointer',
+                      fontFamily: '"JetBrains Mono", monospace',
+                    }}
+                  >
+                    TEST PROTOCOL REJECTION
+                  </button>
+                </div>
+              )}
+
+              <div style={{ position: 'relative', height: 275 }}>
                 <LiquidityCanvas
                   bids={bids}
                   asks={asks}
@@ -1563,40 +1839,114 @@ export default function App() {
             </div>
 
             {/* Real-Time Trade Stream Tape */}
-            <div className="card" style={{ height: 260 }}>
-              <div className="card-header">
+            <div className="card" style={{ height: 280, display: 'flex', flexDirection: 'column' }}>
+              <div className="card-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <span style={{ color: '#10B981' }}>RECENT MATCHED TRADES</span>
-                <span style={{ fontSize: 10, color: '#64748B' }}>TAPE</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <button
+                    type="button"
+                    onClick={() => setTradeFilter('GLOBAL')}
+                    style={{
+                      background: tradeFilter === 'GLOBAL' ? 'rgba(16, 185, 129, 0.2)' : 'transparent',
+                      border: `1px solid ${tradeFilter === 'GLOBAL' ? '#10B981' : '#1E293B'}`,
+                      color: tradeFilter === 'GLOBAL' ? '#10B981' : '#94A3B8',
+                      borderRadius: 3,
+                      padding: '2px 6px',
+                      fontSize: 9,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    GLOBAL ({trades.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTradeFilter('MY')}
+                    style={{
+                      background: tradeFilter === 'MY' ? 'rgba(0, 240, 255, 0.2)' : 'transparent',
+                      border: `1px solid ${tradeFilter === 'MY' ? '#00F0FF' : '#1E293B'}`,
+                      color: tradeFilter === 'MY' ? '#00F0FF' : '#94A3B8',
+                      borderRadius: 3,
+                      padding: '2px 6px',
+                      fontSize: 9,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    MY TRADES
+                  </button>
+                </div>
               </div>
-              <div className="card-body" style={{ padding: 0 }}>
-                {trades.length === 0 ? (
-                  <div style={{ padding: 20, textAlign: 'center', color: '#64748B', fontSize: 11 }}>
-                    No trades executed yet
-                  </div>
-                ) : (
-                  <table className="ladder-table">
-                    <thead>
-                      <tr>
-                        <th>PRICE</th>
-                        <th>QTY</th>
-                        <th>TIME</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {trades.slice(0, 20).map((t, idx) => (
-                        <tr key={t.id || idx}>
-                          <td style={{ color: t.side === 'BUY' ? '#00F0FF' : '#FF2A54', fontWeight: 600 }}>
-                            {formatDKC(t.price)}
-                          </td>
-                          <td>{t.qty}</td>
-                          <td style={{ color: '#64748B', fontSize: 10 }}>
-                            {new Date(t.created_at || Date.now()).toLocaleTimeString()}
-                          </td>
+              <div className="card-body" style={{ padding: 0, flex: 1, overflowY: 'auto' }}>
+                {(() => {
+                  const filteredTrades = trades.filter((t: any) => {
+                    if (tradeFilter === 'GLOBAL') return true;
+                    if (!user) return true;
+                    return (
+                      t.buyerUserId === user.id ||
+                      t.sellerUserId === user.id ||
+                      t.buyerUsername === user.username ||
+                      t.sellerUsername === user.username
+                    );
+                  });
+
+                  if (filteredTrades.length === 0) {
+                    return (
+                      <div style={{ padding: 20, textAlign: 'center', color: '#64748B', fontSize: 11 }}>
+                        {tradeFilter === 'MY'
+                          ? 'No trades executed by your active account yet. Match an order or submit a crossing order to trade!'
+                          : 'No trades executed yet on this instrument.'}
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <table className="ladder-table">
+                      <thead>
+                        <tr>
+                          <th>TIME</th>
+                          <th>SIDE</th>
+                          <th>PRICE</th>
+                          <th>QTY</th>
+                          <th>PARTIES</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
+                      </thead>
+                      <tbody>
+                        {filteredTrades.slice(0, 30).map((t: any, idx) => {
+                          const isBuy = t.side === 'BUY';
+                          const buyerIsMe = user && (t.buyerUserId === user.id || t.buyerUsername === user.username);
+                          const sellerIsMe = user && (t.sellerUserId === user.id || t.sellerUsername === user.username);
+                          const buyerLabel = buyerIsMe ? 'YOU' : getTraderLabel(t.buyerUsername || t.buyerUserId);
+                          const sellerLabel = sellerIsMe ? 'YOU' : getTraderLabel(t.sellerUsername || t.sellerUserId);
+
+                          return (
+                            <tr key={t.id || idx}>
+                              <td style={{ color: '#64748B', fontSize: 10 }}>
+                                {new Date(t.created_at || Date.now()).toLocaleTimeString()}
+                              </td>
+                              <td style={{ color: isBuy ? '#00F0FF' : '#FF2A54', fontWeight: 700, fontSize: 10 }}>
+                                {t.side || (isBuy ? 'BUY' : 'SELL')}
+                              </td>
+                              <td style={{ color: isBuy ? '#00F0FF' : '#FF2A54', fontWeight: 600 }}>
+                                {formatDKC(t.price)}
+                              </td>
+                              <td>{t.qty}</td>
+                              <td style={{ fontSize: 10 }}>
+                                <span style={{ color: buyerIsMe ? '#00F0FF' : '#CBD5E1', fontWeight: buyerIsMe ? 800 : 500 }}>
+                                  {buyerLabel}
+                                </span>
+                                <span style={{ color: '#64748B', margin: '0 3px' }}>⇄</span>
+                                <span style={{ color: sellerIsMe ? '#F59E0B' : '#CBD5E1', fontWeight: sellerIsMe ? 800 : 500 }}>
+                                  {sellerLabel}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  );
+                })()}
               </div>
             </div>
           </div>
@@ -1624,53 +1974,51 @@ export default function App() {
 
             <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
               {/* Filter Tabs */}
-              <div style={{ display: 'flex', background: '#090D1A', border: '1px solid #1E293B', borderRadius: 6, padding: 3, gap: 4 }}>
-                <button
-                  onClick={() => setAuctionFilter('ALL')}
-                  style={{
-                    background: auctionFilter === 'ALL' ? '#1E293B' : 'transparent',
-                    color: auctionFilter === 'ALL' ? '#00F0FF' : '#94A3B8',
-                    border: 'none',
-                    borderRadius: 4,
-                    padding: '6px 12px',
-                    fontSize: 11,
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                  }}
-                >
-                  ALL ({auctions.length})
-                </button>
-                <button
-                  onClick={() => setAuctionFilter('LIVE')}
-                  style={{
-                    background: auctionFilter === 'LIVE' ? '#1E293B' : 'transparent',
-                    color: auctionFilter === 'LIVE' ? '#10B981' : '#94A3B8',
-                    border: 'none',
-                    borderRadius: 4,
-                    padding: '6px 12px',
-                    fontSize: 11,
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                  }}
-                >
-                  ⚡ LIVE ({auctions.filter((a) => a.status === 'ACTIVE').length})
-                </button>
-                <button
-                  onClick={() => setAuctionFilter('SOLD')}
-                  style={{
-                    background: auctionFilter === 'SOLD' ? '#1E293B' : 'transparent',
-                    color: auctionFilter === 'SOLD' ? '#F59E0B' : '#94A3B8',
-                    border: 'none',
-                    borderRadius: 4,
-                    padding: '6px 12px',
-                    fontSize: 11,
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                  }}
-                >
-                  ✓ CLEARED ({auctions.filter((a) => a.status === 'SOLD_OUT' || a.status === 'CANCELLED').length})
-                </button>
-              </div>
+              {(() => {
+                const liveCount = auctions.filter((a) => a.status === 'ACTIVE').length;
+                const settledCount = auctions.filter((a) => a.status !== 'ACTIVE').length;
+
+                return (
+                  <div style={{ display: 'flex', background: '#090D1A', border: '1px solid #1E293B', borderRadius: 6, padding: 3, gap: 4 }}>
+                    <button
+                      onClick={() => setAuctionFilter('LIVE')}
+                      style={{
+                        background: auctionFilter === 'LIVE' ? '#1E293B' : 'transparent',
+                        color: auctionFilter === 'LIVE' ? '#10B981' : '#94A3B8',
+                        border: 'none',
+                        borderRadius: 4,
+                        padding: '6px 14px',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                      }}
+                    >
+                      <span>🟢 LIVE AUCTIONS ({liveCount})</span>
+                    </button>
+                    <button
+                      onClick={() => setAuctionFilter('SETTLED')}
+                      style={{
+                        background: auctionFilter === 'SETTLED' ? '#1E293B' : 'transparent',
+                        color: auctionFilter === 'SETTLED' ? '#F59E0B' : '#94A3B8',
+                        border: 'none',
+                        borderRadius: 4,
+                        padding: '6px 14px',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                      }}
+                    >
+                      <span>📜 SETTLED / PAST HISTORY ({settledCount})</span>
+                    </button>
+                  </div>
+                );
+              })()}
 
               <button
                 onClick={() => {
@@ -1722,34 +2070,60 @@ export default function App() {
           {(() => {
             const filteredAuctions = auctions.filter((auc) => {
               if (auctionFilter === 'LIVE') return auc.status === 'ACTIVE';
-              if (auctionFilter === 'SOLD') return auc.status === 'SOLD_OUT' || auc.status === 'CANCELLED';
-              return true;
+              return auc.status !== 'ACTIVE';
             });
 
             if (filteredAuctions.length === 0) {
               return (
                 <div className="card" style={{ padding: 48, textAlign: 'center', color: '#64748B' }}>
-                  <div style={{ fontSize: 32, marginBottom: 12 }}>🏛️</div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: '#94A3B8', marginBottom: 6 }}>
-                    No {auctionFilter !== 'ALL' ? auctionFilter : ''} Dutch Auctions Found
+                  <div style={{ fontSize: 36, marginBottom: 12 }}>🏛️</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#F8FAFC', marginBottom: 6 }}>
+                    {auctionFilter === 'LIVE' ? 'No Active Dutch Auctions Currently Running' : 'No Settled Auction History Found'}
                   </div>
-                  <div style={{ fontSize: 12, marginBottom: 16 }}>
-                    Launch descending price auctions to distribute inventory with automated collar guards.
+                  <div style={{ fontSize: 12, color: '#94A3B8', marginBottom: 20, maxWidth: 500, margin: '0 auto 20px' }}>
+                    {auctionFilter === 'LIVE'
+                      ? 'Launch descending-price auctions to distribute secondary inventory, or reset to baseline demo state to seed fresh 1-hour active auctions.'
+                      : 'Completed, sold out, or expired Dutch auctions will appear here with final clearing price.'}
                   </div>
-                  <button
-                    onClick={() => setShowCreateAuctionModal(true)}
-                    style={{
-                      background: '#00F0FF',
-                      color: '#06080F',
-                      border: 'none',
-                      borderRadius: 4,
-                      padding: '8px 16px',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    + Create First Auction
-                  </button>
+                  <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+                    <button
+                      onClick={() => {
+                        setAuctionSymbol('FEST-GA');
+                        setAuctionQty(5);
+                        setAuctionStartPrice(1650);
+                        setAuctionFloorPrice(1000);
+                        setShowCreateAuctionModal(true);
+                      }}
+                      style={{
+                        background: '#00F0FF',
+                        color: '#06080F',
+                        border: 'none',
+                        borderRadius: 4,
+                        padding: '10px 20px',
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                        fontFamily: '"JetBrains Mono", monospace',
+                      }}
+                    >
+                      + Create Demo Auction
+                    </button>
+                    <button
+                      onClick={handleResetDemoState}
+                      disabled={resetLoading}
+                      style={{
+                        background: 'rgba(245, 158, 11, 0.15)',
+                        border: '1px solid #F59E0B',
+                        color: '#F59E0B',
+                        borderRadius: 4,
+                        padding: '10px 20px',
+                        fontWeight: 800,
+                        cursor: resetLoading ? 'not-allowed' : 'pointer',
+                        fontFamily: '"JetBrains Mono", monospace',
+                      }}
+                    >
+                      {resetLoading ? 'Restoring...' : '🔄 Reset Demo State'}
+                    </button>
+                  </div>
                 </div>
               );
             }
@@ -2199,93 +2573,162 @@ export default function App() {
 
       {/* Tab: Escrow Custody */}
       {activeTab === 'escrows' && (
-        <div style={{ padding: 20, flex: 1, overflowY: 'auto' }}>
-          <h2 style={{ fontSize: 18, color: '#A855F7', margin: '0 0 4px' }}>ESCROW CUSTODY</h2>
-          <p style={{ color: '#94A3B8', fontSize: 12, margin: '0 0 16px' }}>
-            Two-phase delivery-versus-payment escrow with mock issuer cryptographic verification.
-          </p>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 14 }}>
-            {escrows.map((e) => (
-              <div key={e.id} className="card" style={{ padding: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <span style={{ fontWeight: 700, color: '#F8FAFC' }}>{e.symbol}</span>
-                  <span className="badge badge-mode">{e.status}</span>
-                </div>
-                <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
-                  <div><span style={{ color: '#64748B' }}>Qty: </span>{e.qty} units</div>
-                  <div><span style={{ color: '#64748B' }}>Locked Cash: </span>{formatDKC(e.cashMinor)}</div>
-                  <div><span style={{ color: '#64748B' }}>Buyer: </span>{e.buyerUserId}</div>
-                  <div><span style={{ color: '#64748B' }}>Seller: </span>{e.sellerUserId}</div>
-                </div>
-                {e.status === 'LOCKED' && e.sellerUserId === user?.id && (
-                  <button
-                    onClick={async () => {
-                      const rRes = await fetch('/api/mock-issuer/receipt', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
-                        credentials: 'include',
-                        body: JSON.stringify({ escrowId: e.id }),
-                      });
-                      if (rRes.ok) {
-                        const { receipt } = await rRes.json();
-                        const delRes = await fetch(`/api/escrows/${e.id}/deliver`, {
+        <div style={{ padding: 24, flex: 1, overflowY: 'auto' }}>
+          <div style={{ marginBottom: 20 }}>
+            <h2 style={{ fontSize: 20, color: '#A855F7', margin: '0 0 6px' }}>ESCROW CUSTODY & DvP SETTLEMENT</h2>
+            <p style={{ color: '#94A3B8', fontSize: 12, margin: 0 }}>
+              Two-phase Delivery-versus-Payment (DvP) escrow for physical and non-fungible assets with mock issuer cryptographic verification.
+            </p>
+          </div>
+
+          {escrows.length === 0 ? (
+            <div className="card" style={{ padding: 48, textAlign: 'center', color: '#64748B' }}>
+              <div style={{ fontSize: 36, marginBottom: 12 }}>🔐</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#F8FAFC', marginBottom: 6 }}>
+                No Active Escrow Contracts
+              </div>
+              <div style={{ fontSize: 12, color: '#94A3B8', maxWidth: 500, margin: '0 auto 16px' }}>
+                Secondary trading on custody-restricted assets (e.g. VIP sanctum passes & physical cloaks) initiates two-phase Delivery-versus-Payment (DvP) escrow. Funds remain locked until the mock issuer confirms cryptographic delivery receipts.
+              </div>
+              <button
+                onClick={() => {
+                  setActiveTab('cockpit');
+                  setSelectedSymbol('FEST-VIP');
+                }}
+                style={{
+                  background: '#A855F7',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  borderRadius: 4,
+                  padding: '8px 18px',
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  fontFamily: '"JetBrains Mono", monospace',
+                }}
+              >
+                Inspect Custody Asset (FEST-VIP)
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 14 }}>
+              {escrows.map((e) => (
+                <div key={e.id} className="card" style={{ padding: 16 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                    <span style={{ fontWeight: 700, color: '#F8FAFC' }}>{e.symbol}</span>
+                    <span className="badge badge-mode">{e.status}</span>
+                  </div>
+                  <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
+                    <div><span style={{ color: '#64748B' }}>Qty: </span>{e.qty} units</div>
+                    <div><span style={{ color: '#64748B' }}>Locked Cash: </span>{formatDKC(e.cashMinor)}</div>
+                    <div><span style={{ color: '#64748B' }}>Buyer: </span>{e.buyerUserId}</div>
+                    <div><span style={{ color: '#64748B' }}>Seller: </span>{e.sellerUserId}</div>
+                  </div>
+                  {e.status === 'LOCKED' && e.sellerUserId === user?.id && (
+                    <button
+                      onClick={async () => {
+                        const rRes = await fetch('/api/mock-issuer/receipt', {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
                           credentials: 'include',
-                          body: JSON.stringify({ receipt }),
+                          body: JSON.stringify({ escrowId: e.id }),
                         });
-                        if (delRes.ok) {
-                          alert('Escrow delivered and settled successfully!');
-                          fetch('/api/escrows/my', { credentials: 'include' }).then((r) => { if (r.ok) r.json().then(setEscrows); });
-                          fetchSession();
+                        if (rRes.ok) {
+                          const { receipt } = await rRes.json();
+                          const delRes = await fetch(`/api/escrows/${e.id}/deliver`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrfToken },
+                            credentials: 'include',
+                            body: JSON.stringify({ receipt }),
+                          });
+                          if (delRes.ok) {
+                            alert('Escrow delivered and settled successfully!');
+                            fetch('/api/escrows/my', { credentials: 'include' }).then((r) => { if (r.ok) r.json().then(setEscrows); });
+                            fetchSession();
+                          }
                         }
-                      }
-                    }}
-                    style={{
-                      background: '#A855F7',
-                      color: '#FFF',
-                      border: 'none',
-                      borderRadius: 4,
-                      padding: '8px',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Obtain Mock Receipt & Deliver
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
+                      }}
+                      style={{
+                        background: '#A855F7',
+                        color: '#FFF',
+                        border: 'none',
+                        borderRadius: 4,
+                        padding: '8px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Obtain Mock Receipt & Deliver
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {/* Tab: Proof of Solvency */}
       {activeTab === 'solvency' && (
-        <div style={{ padding: 20, flex: 1, overflowY: 'auto', maxWidth: 800 }}>
-          <h2 style={{ fontSize: 18, color: '#10B981', margin: '0 0 4px' }}>CRYPTOGRAPHIC PROOF OF SOLVENCY</h2>
+        <div style={{ padding: 24, flex: 1, overflowY: 'auto', maxWidth: 860 }}>
+          <h2 style={{ fontSize: 20, color: '#10B981', margin: '0 0 6px' }}>CRYPTOGRAPHIC PROOF OF SOLVENCY</h2>
           <p style={{ color: '#94A3B8', fontSize: 12, margin: '0 0 16px' }}>
             Merkle Sum Tree inclusion verification proving full asset backing without disclosing private balances.
           </p>
 
-          <button
-            onClick={runSolvencyVerification}
-            style={{
-              background: '#10B981',
-              color: '#06080F',
-              border: 'none',
-              borderRadius: 4,
-              padding: '10px 20px',
-              fontWeight: 800,
-              cursor: 'pointer',
-              marginBottom: 16,
-            }}
-          >
-            RUN LIVE SOLVENCY AUDIT
-          </button>
+          <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+            <button
+              onClick={runSolvencyVerification}
+              style={{
+                background: '#10B981',
+                color: '#06080F',
+                border: 'none',
+                borderRadius: 4,
+                padding: '10px 20px',
+                fontWeight: 800,
+                cursor: 'pointer',
+                fontFamily: '"JetBrains Mono", monospace',
+              }}
+            >
+              RUN LIVE SOLVENCY AUDIT
+            </button>
+
+            <button
+              onClick={handleSimulateTamper}
+              style={{
+                background: 'rgba(255, 42, 84, 0.15)',
+                border: '1px solid #FF2A54',
+                color: '#FF2A54',
+                borderRadius: 4,
+                padding: '10px 20px',
+                fontWeight: 800,
+                cursor: 'pointer',
+                fontFamily: '"JetBrains Mono", monospace',
+              }}
+            >
+              ⚡ SIMULATE TAMPER REJECTION TEST
+            </button>
+          </div>
+
+          {tamperResult && (
+            <div
+              style={{
+                background: tamperResult.includes('✓') ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255, 42, 84, 0.15)',
+                border: `1px solid ${tamperResult.includes('✓') ? '#10B981' : '#FF2A54'}`,
+                color: tamperResult.includes('✓') ? '#10B981' : '#FF2A54',
+                padding: '12px 16px',
+                borderRadius: 6,
+                fontSize: 12,
+                fontWeight: 600,
+                marginBottom: 16,
+                fontFamily: '"JetBrains Mono", monospace',
+              }}
+            >
+              {tamperResult}
+            </div>
+          )}
 
           {solvencyChecks.check1 !== null && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div className="card" style={{ padding: 14, borderLeft: `4px solid ${solvencyChecks.check1 ? '#10B981' : '#FF2A54'}` }}>
                 <strong>CHECK 1: Merkle Sum Tree Path Verification</strong>
                 <p style={{ margin: '4px 0 0', color: '#94A3B8', fontSize: 12 }}>
@@ -2306,16 +2749,16 @@ export default function App() {
               </div>
 
               {solvencyProof && (
-                <div className="card" style={{ padding: 14 }}>
-                  <div style={{ color: '#00F0FF', fontWeight: 700, fontSize: 12, marginBottom: 6 }}>
+                <div className="card" style={{ padding: 16 }}>
+                  <div style={{ color: '#00F0FF', fontWeight: 700, fontSize: 13, marginBottom: 8 }}>
                     CRYPTOGRAPHIC INCLUSION PROOF
                   </div>
-                  <div style={{ fontSize: 11, color: '#94A3B8', fontFamily: '"JetBrains Mono", monospace' }}>
-                    <div>User ID: {solvencyProof.userId}</div>
-                    <div>Account Balance: {formatDKC(solvencyProof.balance)}</div>
-                    <div>Expected Total: {formatDKC(solvencyProof.expectedTotal)}</div>
-                    <div>Expected Root: {solvencyProof.expectedRoot}</div>
-                    <div>Merkle Siblings: {solvencyProof.siblings.length} nodes</div>
+                  <div style={{ fontSize: 11, color: '#94A3B8', fontFamily: '"JetBrains Mono", monospace', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <div>User ID: <span style={{ color: '#F8FAFC' }}>{solvencyProof.userId}</span></div>
+                    <div>Account Balance: <span style={{ color: '#10B981' }}>{formatDKC(solvencyProof.balance)}</span></div>
+                    <div>Expected Total Liabilities: <span style={{ color: '#F8FAFC' }}>{formatDKC(solvencyProof.expectedTotal)}</span></div>
+                    <div>Root Hash: <span style={{ color: '#00F0FF', wordBreak: 'break-all' }}>{solvencyProof.expectedRoot}</span></div>
+                    <div>Merkle Siblings: <span style={{ color: '#F8FAFC' }}>{solvencyProof.siblings.length} nodes</span></div>
                   </div>
                 </div>
               )}
@@ -2326,13 +2769,13 @@ export default function App() {
 
       {/* Tab: Admin Diagnostics */}
       {activeTab === 'diagnostics' && (
-        <div style={{ padding: 20, flex: 1, overflowY: 'auto', maxWidth: 800 }}>
-          <h2 style={{ fontSize: 18, color: '#F59E0B', margin: '0 0 4px' }}>ADMIN DIAGNOSTICS & BENCHMARKS</h2>
+        <div style={{ padding: 24, flex: 1, overflowY: 'auto', maxWidth: 860 }}>
+          <h2 style={{ fontSize: 20, color: '#F59E0B', margin: '0 0 6px' }}>ADMIN DIAGNOSTICS & BENCHMARKS</h2>
           <p style={{ color: '#94A3B8', fontSize: 12, margin: '0 0 16px' }}>
-            Run live reconciliation reports, HFT scalper burst tests, and demo resets.
+            Run live reconciliation reports, HFT scalper burst tests, and demo state resets.
           </p>
 
-          <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+          <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
             <button
               onClick={async () => {
                 setDiagRunning(true);
@@ -2349,12 +2792,13 @@ export default function App() {
                 color: '#06080F',
                 border: 'none',
                 borderRadius: 4,
-                padding: '8px 16px',
-                fontWeight: 700,
-                cursor: 'pointer',
+                padding: '10px 18px',
+                fontWeight: 800,
+                cursor: diagRunning ? 'not-allowed' : 'pointer',
+                fontFamily: '"JetBrains Mono", monospace',
               }}
             >
-              Run Double-Entry Reconciliation
+              {diagRunning ? 'Running...' : 'Run Double-Entry Reconciliation'}
             </button>
 
             <button
@@ -2378,18 +2822,39 @@ export default function App() {
                 color: '#FFF',
                 border: 'none',
                 borderRadius: 4,
-                padding: '8px 16px',
-                fontWeight: 700,
-                cursor: 'pointer',
+                padding: '10px 18px',
+                fontWeight: 800,
+                cursor: diagRunning ? 'not-allowed' : 'pointer',
+                fontFamily: '"JetBrains Mono", monospace',
               }}
             >
-              Run 50-Order Scalper Burst
+              {diagRunning ? 'Bursting...' : 'Run 50-Order Scalper Burst'}
+            </button>
+
+            <button
+              onClick={handleResetDemoState}
+              disabled={resetLoading}
+              style={{
+                background: 'rgba(0, 240, 255, 0.15)',
+                border: '1px solid #00F0FF',
+                color: '#00F0FF',
+                borderRadius: 4,
+                padding: '10px 18px',
+                fontWeight: 800,
+                cursor: resetLoading ? 'not-allowed' : 'pointer',
+                fontFamily: '"JetBrains Mono", monospace',
+              }}
+            >
+              {resetLoading ? 'Restoring...' : '🔄 Reset Demo State (Clean Baseline)'}
             </button>
           </div>
 
           {diagResult && (
-            <div className="card" style={{ padding: 14 }}>
-              <pre style={{ margin: 0, fontSize: 12, overflowX: 'auto', color: '#00F0FF' }}>
+            <div className="card" style={{ padding: 16 }}>
+              <div style={{ color: '#94A3B8', fontSize: 11, marginBottom: 8, fontWeight: 700 }}>
+                DIAGNOSTIC REPORT OUTPUT:
+              </div>
+              <pre style={{ margin: 0, fontSize: 12, overflowX: 'auto', color: '#00F0FF', background: '#04060A', padding: 12, borderRadius: 4 }}>
                 {JSON.stringify(diagResult, null, 2)}
               </pre>
             </div>
@@ -2417,11 +2882,45 @@ export default function App() {
             zIndex: 2000,
           }}
         >
-          <div className="card" style={{ width: 380, padding: 24, boxShadow: '0 0 24px rgba(0,240,255,0.2)' }}>
+          <div className="card" style={{ width: 440, padding: 24, boxShadow: '0 0 30px rgba(0,240,255,0.25)', border: '1px solid #1E293B' }}>
+            {/* Modal Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <strong style={{ fontSize: 16, color: '#00F0FF' }}>
-                {authMode === 'login' ? 'EXCHANGE LOGIN' : 'CREATE ACCOUNT'}
-              </strong>
+              <div style={{ display: 'flex', gap: 12 }}>
+                <button
+                  type="button"
+                  onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    borderBottom: authMode === 'login' ? '2px solid #00F0FF' : '2px solid transparent',
+                    color: authMode === 'login' ? '#00F0FF' : '#64748B',
+                    fontSize: 14,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    paddingBottom: 4,
+                    fontFamily: '"JetBrains Mono", monospace',
+                  }}
+                >
+                  EXCHANGE LOGIN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setAuthMode('register'); setAuthError(''); }}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    borderBottom: authMode === 'register' ? '2px solid #10B981' : '2px solid transparent',
+                    color: authMode === 'register' ? '#10B981' : '#64748B',
+                    fontSize: 14,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    paddingBottom: 4,
+                    fontFamily: '"JetBrains Mono", monospace',
+                  }}
+                >
+                  CREATE ACCOUNT (+GRANT)
+                </button>
+              </div>
               <button
                 onClick={() => setShowAuthModal(false)}
                 style={{ background: 'transparent', border: 'none', color: '#64748B', fontSize: 16, cursor: 'pointer' }}
@@ -2430,6 +2929,127 @@ export default function App() {
               </button>
             </div>
 
+            {/* 1-Click Demo Logins & Seeded Credentials Strip */}
+            {authMode === 'login' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
+                <div>
+                  <span style={{ fontSize: 10, color: '#64748B', fontWeight: 700, display: 'block', marginBottom: 6 }}>
+                    ⚡ 1-CLICK INSTANT DEMO LOGIN:
+                  </span>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => handleOneClickLogin('admin', 'admin_darkhold_2026')}
+                      disabled={authLoading}
+                      style={{
+                        background: 'rgba(245, 158, 11, 0.15)',
+                        border: '1px solid #F59E0B',
+                        color: '#F59E0B',
+                        borderRadius: 4,
+                        padding: '6px 4px',
+                        fontSize: 10,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                        fontFamily: '"JetBrains Mono", monospace',
+                      }}
+                    >
+                      👑 Admin
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleOneClickLogin('alice', 'demo_darkhold_2026')}
+                      disabled={authLoading}
+                      style={{
+                        background: 'rgba(0, 240, 255, 0.15)',
+                        border: '1px solid #00F0FF',
+                        color: '#00F0FF',
+                        borderRadius: 4,
+                        padding: '6px 4px',
+                        fontSize: 10,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                        fontFamily: '"JetBrains Mono", monospace',
+                      }}
+                    >
+                      🔷 Alice
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleOneClickLogin('bob', 'demo_darkhold_2026')}
+                      disabled={authLoading}
+                      style={{
+                        background: 'rgba(16, 185, 129, 0.15)',
+                        border: '1px solid #10B981',
+                        color: '#10B981',
+                        borderRadius: 4,
+                        padding: '6px 4px',
+                        fontSize: 10,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                        fontFamily: '"JetBrains Mono", monospace',
+                      }}
+                    >
+                      🟢 Bob
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleOneClickLogin('carol', 'demo_darkhold_2026')}
+                      disabled={authLoading}
+                      style={{
+                        background: 'rgba(168, 85, 247, 0.15)',
+                        border: '1px solid #A855F7',
+                        color: '#A855F7',
+                        borderRadius: 4,
+                        padding: '6px 4px',
+                        fontSize: 10,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                        fontFamily: '"JetBrains Mono", monospace',
+                      }}
+                    >
+                      🟣 Carol
+                    </button>
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    background: 'rgba(15, 23, 42, 0.7)',
+                    border: '1px solid #1E293B',
+                    borderRadius: 4,
+                    padding: '8px 10px',
+                    fontSize: 10,
+                    color: '#94A3B8',
+                  }}
+                >
+                  <div style={{ fontWeight: 700, color: '#F8FAFC', marginBottom: 2 }}>💡 PRE-SEEDED CREDENTIALS:</div>
+                  <div>• <strong style={{ color: '#F59E0B' }}>admin</strong> : <code>admin_darkhold_2026</code> (Admin Diagnostics & Solvency)</div>
+                  <div>• <strong style={{ color: '#00F0FF' }}>alice</strong> / <strong style={{ color: '#10B981' }}>bob</strong> / <strong style={{ color: '#A855F7' }}>carol</strong> : <code>demo_darkhold_2026</code> (Traders)</div>
+                </div>
+              </div>
+            )}
+
+            {/* Starter Grant Banner in Register Mode */}
+            {authMode === 'register' && (
+              <div
+                style={{
+                  background: 'rgba(16, 185, 129, 0.1)',
+                  border: '1px solid rgba(16, 185, 129, 0.35)',
+                  borderRadius: 6,
+                  padding: '10px 12px',
+                  marginBottom: 14,
+                  fontSize: 11,
+                }}
+              >
+                <div style={{ fontWeight: 800, color: '#10B981', marginBottom: 4 }}>
+                  🎁 WELCOME STARTER GRANT INCLUDED
+                </div>
+                <div style={{ color: '#CBD5E1', fontSize: 10, lineHeight: 1.4 }}>
+                  New trader accounts automatically receive <strong style={{ color: '#10B981' }}>25,000.00 DKC</strong> + <strong style={{ color: '#00F0FF' }}>10 FEST-GA</strong> + <strong style={{ color: '#F59E0B' }}>5 MERCH-CLOAK</strong> deposited directly into verified double-entry ledger accounts!
+                </div>
+              </div>
+            )}
+
             <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div>
                 <label style={{ fontSize: 11, color: '#64748B', display: 'block', marginBottom: 4 }}>USERNAME</label>
@@ -2437,6 +3057,7 @@ export default function App() {
                   type="text"
                   value={authUsername}
                   onChange={(e) => setAuthUsername(e.target.value)}
+                  placeholder="e.g. Satoshi"
                   required
                   style={{ width: '100%' }}
                 />
@@ -2448,10 +3069,37 @@ export default function App() {
                   type="password"
                   value={authPassword}
                   onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder="Minimum 6 characters"
                   required
                   style={{ width: '100%' }}
                 />
               </div>
+
+              {authMode === 'register' && (
+                <div>
+                  <label style={{ fontSize: 11, color: '#64748B', display: 'block', marginBottom: 4 }}>
+                    ROLE / TRADER PROFILE
+                  </label>
+                  <select
+                    value={authProfile}
+                    onChange={(e) => setAuthProfile(e.target.value)}
+                    style={{
+                      width: '100%',
+                      background: '#0F172A',
+                      color: '#F8FAFC',
+                      border: '1px solid #1E293B',
+                      borderRadius: 4,
+                      padding: 8,
+                      fontSize: 11,
+                      fontFamily: '"JetBrains Mono", monospace',
+                    }}
+                  >
+                    <option value="Standard Trader (with Starter Grant)">Standard Trader (with Starter Grant)</option>
+                    <option value="HFT High-Frequency Arbitrageur">HFT High-Frequency Arbitrageur</option>
+                    <option value="Institutional Liquidity Provider">Institutional Liquidity Provider</option>
+                  </select>
+                </div>
+              )}
 
               {authError && (
                 <div style={{ color: '#FF2A54', fontSize: 11, background: 'rgba(255,42,84,0.15)', padding: 8, borderRadius: 4 }}>
@@ -2463,7 +3111,7 @@ export default function App() {
                 type="submit"
                 disabled={authLoading}
                 style={{
-                  background: '#00F0FF',
+                  background: authMode === 'login' ? '#00F0FF' : '#10B981',
                   color: '#06080F',
                   border: 'none',
                   borderRadius: 4,
@@ -2471,17 +3119,18 @@ export default function App() {
                   fontWeight: 800,
                   cursor: authLoading ? 'not-allowed' : 'pointer',
                   marginTop: 6,
+                  fontFamily: '"JetBrains Mono", monospace',
                 }}
               >
-                {authLoading ? 'AUTHENTICATING...' : authMode === 'login' ? 'LOGIN' : 'REGISTER'}
+                {authLoading ? 'AUTHENTICATING...' : authMode === 'login' ? 'LOGIN' : 'CREATE ACCOUNT & CLAIM GRANT'}
               </button>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94A3B8', marginTop: 4 }}>
                 <span
-                  onClick={() => setAuthMode((prev) => (prev === 'login' ? 'register' : 'login'))}
+                  onClick={() => { setAuthMode((prev) => (prev === 'login' ? 'register' : 'login')); setAuthError(''); }}
                   style={{ color: '#00F0FF', cursor: 'pointer' }}
                 >
-                  {authMode === 'login' ? 'Need an account? Register' : 'Have an account? Login'}
+                  {authMode === 'login' ? 'Need an account? Register (+Grant)' : 'Have an account? Login'}
                 </span>
                 {authLoading && (
                   <span onClick={cancelAuthRequest} style={{ color: '#FF2A54', cursor: 'pointer' }}>

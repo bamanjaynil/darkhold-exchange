@@ -271,35 +271,139 @@ export const LiquidityCanvas: React.FC<LiquidityCanvasProps> = ({
         ctx.fillText(spreadText, midX - spMetrics.width / 2, 22);
 
       } else {
-        // --- VIEW MODE: EXECUTION PULSE TIMELINE ---
+        // --- VIEW MODE: EXECUTION PULSE TIMELINE & PRICE CHART ---
         ctx.font = '11px "JetBrains Mono", monospace';
         ctx.fillStyle = '#94A3B8';
         ctx.fillText('⚡ REAL-TIME EXECUTION TAPE & MATCH PULSE', 16, 20);
 
-        const visibleTrades = trades.slice(0, 30);
-        const colWidth = (w - 32) / Math.max(visibleTrades.length, 1);
+        const padLeft = 40;
+        const padRight = 80;
+        const padTop = 32;
+        const padBottom = 26;
+        const plotW = w - padLeft - padRight;
+        const plotH = h - padTop - padBottom;
 
-        for (let i = 0; i < visibleTrades.length; i++) {
-          const t = visibleTrades[i]!;
-          const isBuy = t.side === 'BUY';
-          const x = 20 + i * colWidth;
-          const bubbleRadius = Math.max(4, Math.min(18, t.qty * 3));
-          const y = h * 0.5 + (isBuy ? -1 : 1) * (bubbleRadius * 2);
+        // Chronological trade order for time-series display
+        const chronTrades = [...trades].reverse();
+        if (chronTrades.length === 0 && lastPrice) {
+          chronTrades.push({ id: 'baseline', price: lastPrice, qty: 1, side: 'BUY' });
+        }
 
-          ctx.save();
+        if (chronTrades.length > 0) {
+          let minP = Math.min(...chronTrades.map((t) => t.price));
+          let maxP = Math.max(...chronTrades.map((t) => t.price));
+          if (lastPrice) {
+            minP = Math.min(minP, lastPrice);
+            maxP = Math.max(maxP, lastPrice);
+          }
+          if (minP === maxP) {
+            minP = Math.round(minP * 0.995);
+            maxP = Math.round(maxP * 1.005);
+          }
+          const priceRange = Math.max(maxP - minP, 100);
+
+          const getY = (price: number) => {
+            const frac = (price - minP) / priceRange;
+            return padTop + plotH - frac * plotH;
+          };
+
+          const getX = (idx: number, total: number) => {
+            if (total <= 1) return padLeft + plotW / 2;
+            return padLeft + (idx / (total - 1)) * plotW;
+          };
+
+          // Draw horizontal price gridlines & labels
+          const gridSteps = 4;
+          ctx.strokeStyle = 'rgba(30, 41, 59, 0.6)';
+          ctx.fillStyle = '#64748B';
+          ctx.font = '10px "JetBrains Mono", monospace';
+          ctx.lineWidth = 1;
+          for (let step = 0; step <= gridSteps; step++) {
+            const p = minP + (priceRange * step) / gridSteps;
+            const y = getY(p);
+            ctx.beginPath();
+            ctx.setLineDash([2, 4]);
+            ctx.moveTo(padLeft, y);
+            ctx.lineTo(w - padRight, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillText(formatDKC(p), w - padRight + 6, y + 3);
+          }
+
+          // Area gradient fill under execution curve
           ctx.beginPath();
-          ctx.arc(x, y, bubbleRadius, 0, Math.PI * 2);
-          ctx.fillStyle = isBuy ? 'rgba(0, 240, 255, 0.6)' : 'rgba(255, 42, 84, 0.6)';
-          ctx.shadowColor = isBuy ? '#00F0FF' : '#FF2A54';
-          ctx.shadowBlur = 10;
-          ctx.fill();
-          ctx.strokeStyle = isBuy ? '#00F0FF' : '#FF2A54';
-          ctx.stroke();
-          ctx.restore();
+          ctx.moveTo(getX(0, chronTrades.length), padTop + plotH);
+          for (let i = 0; i < chronTrades.length; i++) {
+            const t = chronTrades[i]!;
+            ctx.lineTo(getX(i, chronTrades.length), getY(t.price));
+          }
+          ctx.lineTo(getX(chronTrades.length - 1, chronTrades.length), padTop + plotH);
+          ctx.closePath();
 
-          ctx.fillStyle = '#F8FAFC';
-          ctx.font = '9px "JetBrains Mono", monospace';
-          ctx.fillText(`${t.qty}x`, x - 6, y + 3);
+          const areaGrad = ctx.createLinearGradient(0, padTop, 0, padTop + plotH);
+          areaGrad.addColorStop(0, 'rgba(0, 240, 255, 0.25)');
+          areaGrad.addColorStop(0.7, 'rgba(0, 240, 255, 0.05)');
+          areaGrad.addColorStop(1, 'rgba(0, 240, 255, 0.0)');
+          ctx.fillStyle = areaGrad;
+          ctx.fill();
+
+          // Continuous price line
+          ctx.beginPath();
+          for (let i = 0; i < chronTrades.length; i++) {
+            const t = chronTrades[i]!;
+            const px = getX(i, chronTrades.length);
+            const py = getY(t.price);
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.strokeStyle = '#00F0FF';
+          ctx.lineWidth = 2;
+          ctx.shadowColor = 'rgba(0, 240, 255, 0.7)';
+          ctx.shadowBlur = 6;
+          ctx.stroke();
+          ctx.shadowBlur = 0;
+
+          // Trade Execution Nodes
+          for (let i = 0; i < chronTrades.length; i++) {
+            const t = chronTrades[i]!;
+            const isBuy = t.side === 'BUY';
+            const px = getX(i, chronTrades.length);
+            const py = getY(t.price);
+            const radius = Math.max(3.5, Math.min(8, 2.5 + t.qty * 1.5));
+
+            ctx.beginPath();
+            ctx.arc(px, py, radius, 0, Math.PI * 2);
+            ctx.fillStyle = isBuy ? '#00F0FF' : '#FF2A54';
+            ctx.shadowColor = isBuy ? 'rgba(0, 240, 255, 0.9)' : 'rgba(255, 42, 84, 0.9)';
+            ctx.shadowBlur = 8;
+            ctx.fill();
+            ctx.strokeStyle = '#06080F';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+          }
+
+          // Last Price Line
+          if (lastPrice) {
+            const lastY = getY(lastPrice);
+            ctx.save();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = '#F59E0B';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(padLeft, lastY);
+            ctx.lineTo(w - padRight, lastY);
+            ctx.stroke();
+
+            const lastText = `LAST: ${formatDKC(lastPrice)}`;
+            ctx.font = 'bold 9px "JetBrains Mono", monospace';
+            const lastMetrics = ctx.measureText(lastText);
+            ctx.fillStyle = 'rgba(245, 158, 11, 0.9)';
+            ctx.fillRect(w - padRight - lastMetrics.width - 12, lastY - 9, lastMetrics.width + 8, 18);
+            ctx.fillStyle = '#06080F';
+            ctx.fillText(lastText, w - padRight - lastMetrics.width - 8, lastY + 3);
+            ctx.restore();
+          }
         }
       }
 
@@ -364,7 +468,7 @@ export const LiquidityCanvas: React.FC<LiquidityCanvasProps> = ({
   };
 
   return (
-    <div ref={containerRef} style={{ position: 'relative', width: '100%', height: '100%', minHeight: 280, background: '#06080F', borderRadius: 8, overflow: 'hidden', border: '1px solid #1B2438' }}>
+    <div ref={containerRef} style={{ position: 'relative', width: '100%', height: 275, minHeight: 270, maxHeight: 280, background: '#06080F', borderRadius: 8, overflow: 'hidden', border: '1px solid #1B2438' }}>
       {/* Top Controls Toolbar */}
       <div style={{ position: 'absolute', top: 10, right: 12, zIndex: 10, display: 'flex', gap: 6 }}>
         <button

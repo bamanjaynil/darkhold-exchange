@@ -62,6 +62,25 @@ export const LedgerInspectorDrawer: React.FC<LedgerInspectorDrawerProps> = ({
     }
   };
 
+  const groupedJournals = React.useMemo(() => {
+    const map = new Map<string, { id: string; kind: string; ref_id: string; created_at: string; postings: any[] }>();
+    for (const p of ledgerEntries) {
+      let group = map.get(p.journal_id);
+      if (!group) {
+        group = {
+          id: p.journal_id,
+          kind: p.kind,
+          ref_id: p.ref_id,
+          created_at: p.created_at,
+          postings: [],
+        };
+        map.set(p.journal_id, group);
+      }
+      group.postings.push(p);
+    }
+    return Array.from(map.values());
+  }, [ledgerEntries]);
+
   if (!isOpen) return null;
 
   return (
@@ -221,45 +240,85 @@ export const LedgerInspectorDrawer: React.FC<LedgerInspectorDrawerProps> = ({
             </button>
           </div>
 
-          {ledgerEntries.length === 0 ? (
+          {groupedJournals.length === 0 ? (
             <div style={{ padding: 20, textAlign: 'center', color: '#64748B', fontSize: 12 }}>
               No recent postings found for active user. Submit a trade or order to see atomic ledger journals.
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 380, overflowY: 'auto' }}>
-              {ledgerEntries.slice(0, 30).map((p, idx) => {
-                const isDebit = Number(p.amount) < 0;
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxHeight: 420, overflowY: 'auto' }}>
+              {groupedJournals.slice(0, 25).map((j, idx) => {
+                const totalSum = j.postings.reduce((sum, p) => sum + Number(p.amount), 0);
+                const isZeroSum = totalSum === 0;
                 return (
                   <div
-                    key={p.posting_id || idx}
+                    key={j.id || idx}
                     style={{
-                      background: 'rgba(15, 23, 42, 0.45)',
+                      background: 'rgba(15, 23, 42, 0.55)',
                       border: '1px solid #1E293B',
-                      borderRadius: 4,
-                      padding: '8px 12px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      fontSize: 11,
+                      borderRadius: 6,
+                      padding: '10px 12px',
                     }}
                   >
-                    <div>
-                      <div style={{ color: '#F8FAFC', fontWeight: 600 }}>
-                        {p.kind || 'JOURNAL'} · {p.account_kind || 'ACCOUNT'}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 4 }}>
+                      <div>
+                        <span style={{ color: '#00F0FF', fontWeight: 700, fontSize: 11 }}>
+                          {j.kind || 'JOURNAL'}
+                        </span>
+                        <span style={{ color: '#64748B', fontSize: 10, marginLeft: 8 }}>
+                          Ref: {j.ref_id?.slice(0, 16) || j.id?.slice(0, 16)}
+                        </span>
                       </div>
-                      <div style={{ color: '#64748B', fontSize: 10 }}>
-                        Ref: {p.ref_id?.slice(0, 16) || p.journal_id?.slice(0, 16)} · Seq #{p.seq}
-                      </div>
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 700,
+                          color: isZeroSum ? '#10B981' : '#FF2A54',
+                          background: isZeroSum ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 42, 84, 0.15)',
+                          padding: '2px 6px',
+                          borderRadius: 3,
+                        }}
+                      >
+                        {isZeroSum ? '✓ BALANCED (Δ = 0)' : `IMBALANCE (Δ = ${totalSum})`}
+                      </span>
                     </div>
-                    <div
-                      style={{
-                        color: isDebit ? '#FF2A54' : '#10B981',
-                        fontWeight: 700,
-                        fontSize: 12,
-                      }}
-                    >
-                      {isDebit ? '' : '+'}
-                      {(Number(p.amount) / 100).toLocaleString()} {p.unit}
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {j.postings.map((p, pIdx) => {
+                        const isDebit = Number(p.amount) < 0;
+                        return (
+                          <div
+                            key={p.posting_id || pIdx}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              fontSize: 11,
+                              padding: '2px 0',
+                            }}
+                          >
+                            <div style={{ color: '#CBD5E1' }}>
+                              <span style={{ color: isDebit ? '#FF2A54' : '#10B981', fontWeight: 700, marginRight: 6 }}>
+                                {isDebit ? 'DR' : 'CR'}
+                              </span>
+                              <span>{p.account_kind}</span>
+                              {p.owner_user_id && (
+                                <span style={{ color: '#64748B', fontSize: 10, marginLeft: 4 }}>
+                                  ({p.owner_user_id})
+                                </span>
+                              )}
+                            </div>
+                            <div
+                              style={{
+                                color: isDebit ? '#FF2A54' : '#10B981',
+                                fontWeight: 700,
+                              }}
+                            >
+                              {isDebit ? '' : '+'}
+                              {(Number(p.amount) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {p.unit}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );

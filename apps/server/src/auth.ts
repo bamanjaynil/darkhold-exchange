@@ -66,7 +66,9 @@ export class AuthManager {
     username: string,
     passwordPlain: string,
     ip: string,
-    core: ExchangeCore
+    core: ExchangeCore,
+    role: 'user' | 'admin' = 'user',
+    _starterProfile: string = 'standard'
   ): Promise<{ user: SessionUser; sessionToken: string; csrfToken: string }> {
     if (!config.REGISTRATION_ENABLED) {
       throw new Error('REGISTRATION_DISABLED');
@@ -95,50 +97,135 @@ export class AuthManager {
 
       await client.query(
         `INSERT INTO users (id, username, password_hash, role, is_demo, is_simulated)
-         VALUES ($1, $2, $3, 'user', false, false)`,
-        [userId, username, pwdHash]
+         VALUES ($1, $2, $3, $4, false, false)`,
+        [userId, username, pwdHash, role]
       );
 
-      // Ledger accounts
+      // 1. Create Ledger accounts for cash
       await client.query(
         `INSERT INTO ledger_accounts (id, kind, owner_user_id, instrument_id)
          VALUES
            ($1, 'USER_AVAILABLE', $2, NULL),
            ($3, 'USER_RESERVED', $2, NULL),
-           ($4, 'ESCROW', $2, NULL)`,
+           ($4, 'ESCROW', $2, NULL)
+         ON CONFLICT (id) DO NOTHING`,
         [`acc_${userId}_cash_avail`, userId, `acc_${userId}_cash_res`, `acc_${userId}_cash_esc`]
       );
 
-      // Initial starter grant
-      const grantAmount = config.STARTER_GRANT_DKC;
-      if (grantAmount > 0) {
-        const jId = `j_grant_${userId}_init`;
-        await client.query(
-          `INSERT INTO journals (id, kind, ref_type, ref_id)
-           VALUES ($1, 'GRANT', 'STARTER_GRANT', $2)`,
-          [jId, userId]
-        );
-        await client.query(
-          `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
-           VALUES
-             ($1, 'acc_issuer_cash', 'CASH', $2, 1),
-             ($1, $3, 'CASH', $4, 2)`,
-          [jId, -grantAmount, `acc_${userId}_cash_avail`, grantAmount]
-        );
-        await client.query(
-          `INSERT INTO balances (user_id, available, reserved, escrow)
-           VALUES ($1, $2, 0, 0)`,
-          [userId, grantAmount]
-        );
+      // 2. Create Ledger accounts for all active instruments
+      const { rows: instruments } = await client.query<{ id: string; symbol: string }>(
+        'SELECT id, symbol FROM instruments WHERE active = TRUE'
+      );
 
-        // Update core in-memory balance immediately
-        core.getBalance(userId).available = grantAmount;
-      } else {
+      for (const inst of instruments) {
         await client.query(
-          `INSERT INTO balances (user_id, available, reserved, escrow)
-           VALUES ($1, 0, 0, 0)`,
-          [userId]
+          `INSERT INTO ledger_accounts (id, kind, owner_user_id, instrument_id)
+           VALUES
+             ($1, 'USER_AVAILABLE', $4, $5),
+             ($2, 'USER_RESERVED', $4, $5),
+             ($3, 'ESCROW', $4, $5)
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            `acc_${userId}_${inst.symbol}_avail`,
+            `acc_${userId}_${inst.symbol}_res`,
+            `acc_${userId}_${inst.symbol}_esc`,
+            userId,
+            inst.id,
+          ]
         );
+      }
+
+      // Max posting seq for double-entry ordering
+      const { rows: maxSeqRows } = await client.query<{ max_seq: string }>(
+        'SELECT COALESCE(MAX(seq), 0) AS max_seq FROM postings'
+      );
+      let nextSeq = Number(maxSeqRows[0]?.max_seq || 0) + 1;
+
+      // 3. Welcome Starter Grant: 25,000.00 DKC (2,500,000 minor units)
+      const starterCashMinor = 2500000;
+      const jCashId = `j_grant_${userId}_cash`;
+      await client.query(
+        `INSERT INTO journals (id, kind, ref_type, ref_id)
+         VALUES ($1, 'GRANT', 'STARTER_GRANT', $2)`,
+        [jCashId, userId]
+      );
+      await client.query(
+        `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
+         VALUES
+           ($1, 'acc_issuer_cash', 'CASH', $2, $3),
+           ($1, $4, 'CASH', $5, $6)`,
+        [jCashId, -starterCashMinor, nextSeq++, `acc_${userId}_cash_avail`, starterCashMinor, nextSeq++]
+      );
+      await client.query(
+        `INSERT INTO balances (user_id, available, reserved, escrow)
+         VALUES ($1, $2, 0, 0)`,
+        [userId, starterCashMinor]
+      );
+
+      // Update in-memory core balance
+      core.getBalance(userId).available = starterCashMinor;
+      core.getBalance(userId).reserved = 0;
+      core.getBalance(userId).escrow = 0;
+
+      // 4. Starter Inventory Grants: 10 FEST-GA + 5 MERCH-CLOAK
+      const inventoryGrants: Array<{ symbol: string; qty: number }> = [
+        { symbol: 'FEST-GA', qty: 10 },
+        { symbol: 'MERCH-CLOAK', qty: 5 },
+      ];
+
+      for (const grant of inventoryGrants) {
+        const inst = instruments.find((i) => i.symbol === grant.symbol);
+        if (inst && grant.qty > 0) {
+          const jInvId = `j_grant_${userId}_${grant.symbol}`;
+          await client.query(
+            `INSERT INTO journals (id, kind, ref_type, ref_id)
+             VALUES ($1, 'GRANT', 'STARTER_INV_GRANT', $2)`,
+            [jInvId, `${userId}:${inst.id}`]
+          );
+          await client.query(
+            `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
+             VALUES
+               ($1, $2, $3, $4, $5),
+               ($1, $6, $3, $7, $8)`,
+            [
+              jInvId,
+              `acc_issuer_${grant.symbol}`,
+              grant.symbol,
+              -grant.qty,
+              nextSeq++,
+              `acc_${userId}_${grant.symbol}_avail`,
+              grant.qty,
+              nextSeq++,
+            ]
+          );
+          await client.query(
+            `INSERT INTO holdings (user_id, instrument_id, available, reserved, escrow)
+             VALUES ($1, $2, $3, 0, 0)
+             ON CONFLICT (user_id, instrument_id) DO UPDATE SET available = EXCLUDED.available`,
+            [userId, inst.id, grant.qty]
+          );
+
+          // Update in-memory core holding
+          core.getHolding(userId, grant.symbol).available = grant.qty;
+          core.getHolding(userId, grant.symbol).reserved = 0;
+          core.getHolding(userId, grant.symbol).escrow = 0;
+        }
+      }
+
+      // Ensure other catalogue holdings exist with 0
+      for (const inst of instruments) {
+        if (!inventoryGrants.some((g) => g.symbol === inst.symbol)) {
+          await client.query(
+            `INSERT INTO holdings (user_id, instrument_id, available, reserved, escrow)
+             VALUES ($1, $2, 0, 0, 0)
+             ON CONFLICT (user_id, instrument_id) DO NOTHING`,
+            [userId, inst.id]
+          );
+          const h = core.getHolding(userId, inst.symbol);
+          h.available = 0;
+          h.reserved = 0;
+          h.escrow = 0;
+        }
       }
 
       // Create session
