@@ -88,7 +88,23 @@ export async function buildServer(customPool?: pg.Pool) {
 
 if (process.argv[1]?.endsWith('server.ts') || process.argv[1]?.endsWith('server.js')) {
   buildServer()
-    .then(({ server }) => {
+    .then(({ server, core }) => {
+      const shutdown = async (signal: string) => {
+        console.log(`[SHUTDOWN] Received ${signal}. Draining persistence and closing...`);
+        try {
+          await core.persistence.flush();
+          await server.close();
+          console.log('[SHUTDOWN] Server closed cleanly.');
+          process.exit(0);
+        } catch (err) {
+          console.error('[SHUTDOWN] Error during graceful shutdown:', err);
+          process.exit(1);
+        }
+      };
+
+      process.on('SIGINT', () => void shutdown('SIGINT'));
+      process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
       server.listen({ port: config.PORT, host: config.HOST }, (err, address) => {
         if (err) {
           console.error('[FATAL] Server failed to start:', err);

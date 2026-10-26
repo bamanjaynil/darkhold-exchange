@@ -50,10 +50,10 @@ export async function performDemoReset(
       );
     }
 
-    const demoUserIds = ['usr_admin', 'usr_alice', 'usr_bob', 'usr_carol'];
+    const allUserIds = ['usr_admin', 'usr_alice', 'usr_bob', 'usr_carol', 'usr_bench_bot', 'usr_bench_maker', 'usr_bench_taker'];
 
-    // 4. Ensure demo user ledger accounts exist
-    for (const uId of demoUserIds) {
+    // 4. Ensure demo & benchmark user ledger accounts exist
+    for (const uId of allUserIds) {
       await client.query(
         `INSERT INTO ledger_accounts (id, kind, owner_user_id, instrument_id)
          VALUES 
@@ -83,9 +83,21 @@ export async function performDemoReset(
       }
     }
 
-    // 5. Clean balanced cash grants: 50,000.00 DKC (5,000,000 minor) per user (total 20,000,000 minor)
-    const initialCashMinor = 5000000;
-    const totalCashMinor = initialCashMinor * demoUserIds.length;
+    // 5. Clean balanced cash grants (50k DKC for demo traders; 10M DKC for admin & benchmark bots)
+    const userCashGrants: Record<string, number> = {
+      usr_admin: 1000000000,
+      usr_alice: 5000000,
+      usr_bob: 5000000,
+      usr_carol: 5000000,
+      usr_bench_bot: 1000000000,
+      usr_bench_maker: 1000000000,
+      usr_bench_taker: 1000000000,
+    };
+
+    let totalCashMinor = 0;
+    for (const uId of allUserIds) {
+      totalCashMinor += userCashGrants[uId] || 0;
+    }
     const cashJournalId = 'j_demo_grant_cash';
 
     await client.query(
@@ -94,21 +106,22 @@ export async function performDemoReset(
       [cashJournalId]
     );
 
-    // Debit each user account
-    for (const uId of demoUserIds) {
+    // Credit each user account
+    for (const uId of allUserIds) {
+      const grantAmt = userCashGrants[uId] || 0;
       await client.query(
         `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
          VALUES ($1, $2, 'CASH', $3, $4)`,
-        [cashJournalId, `acc_${uId}_cash_avail`, initialCashMinor, seedSeq++]
+        [cashJournalId, `acc_${uId}_cash_avail`, grantAmt, seedSeq++]
       );
       await client.query(
         `INSERT INTO balances (user_id, available, reserved, escrow, updated_at)
          VALUES ($1, $2, 0, 0, NOW())`,
-        [uId, initialCashMinor]
+        [uId, grantAmt]
       );
     }
 
-    // Credit issuer account (exact negative sum)
+    // Debit issuer account (exact negative sum)
     await client.query(
       `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
        VALUES ($1, 'acc_issuer_cash', 'CASH', $2, $3)`,
@@ -117,15 +130,18 @@ export async function performDemoReset(
 
     // 6. Starting inventories
     const inventories: Record<string, Record<string, number>> = {
-      usr_admin: { 'FEST-GA': 50, 'FEST-VIP': 20, 'MERCH-CLOAK': 30, 'RELIC-AGAMOTTO': 2 },
+      usr_admin: { 'FEST-GA': 50, 'FEST-VIP': 20, 'MERCH-CLOAK': 30, 'RELIC-AGAMOTTO': 2, 'BENCH-X': 100000 },
       usr_alice: { 'FEST-GA': 25, 'FEST-VIP': 10, 'MERCH-CLOAK': 15, 'RELIC-AGAMOTTO': 1 },
       usr_bob:   { 'FEST-GA': 20, 'FEST-VIP': 8,  'MERCH-CLOAK': 12, 'RELIC-AGAMOTTO': 1 },
       usr_carol: { 'FEST-GA': 15, 'FEST-VIP': 5,  'MERCH-CLOAK': 10, 'RELIC-AGAMOTTO': 0 },
+      usr_bench_bot: { 'BENCH-X': 100000 },
+      usr_bench_maker: { 'BENCH-X': 100000 },
+      usr_bench_taker: { 'BENCH-X': 100000 },
     };
 
     for (const inst of instruments) {
       let totalQty = 0;
-      for (const uId of demoUserIds) {
+      for (const uId of allUserIds) {
         totalQty += inventories[uId]?.[inst.symbol] || 0;
       }
       if (totalQty > 0) {
@@ -136,7 +152,7 @@ export async function performDemoReset(
           [invJId, inst.symbol]
         );
 
-        for (const uId of demoUserIds) {
+        for (const uId of allUserIds) {
           const qty = inventories[uId]?.[inst.symbol] || 0;
           if (qty > 0) {
             await client.query(

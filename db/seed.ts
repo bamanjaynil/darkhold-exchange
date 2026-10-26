@@ -35,6 +35,26 @@ export async function runSeed(connectionUrl?: string): Promise<void> {
 
     await client.query('BEGIN');
 
+    // 0. Full Atomic Table Truncation to guarantee clean slate
+    await client.query(`
+      TRUNCATE TABLE
+        postings,
+        journals,
+        trades,
+        orders,
+        auctions,
+        escrows,
+        balances,
+        holdings,
+        ledger_accounts,
+        instruments,
+        users,
+        sessions,
+        solvency_snapshots,
+        audit_events
+      RESTART IDENTITY CASCADE;
+    `);
+
     // 1. Seed Instruments
     for (const inst of instruments) {
       await client.query(
@@ -210,6 +230,27 @@ export async function runSeed(connectionUrl?: string): Promise<void> {
           );
         }
       }
+
+      // Ensure remaining instruments exist in holdings with 0
+      for (const inst of instruments) {
+        await client.query(
+          `INSERT INTO holdings (user_id, instrument_id, available, reserved, escrow)
+           VALUES ($1, $2, 0, 0, 0)
+           ON CONFLICT (user_id, instrument_id) DO NOTHING;`,
+          [acc.id, inst.id]
+        );
+      }
+    }
+
+    // Mathematical Invariant Verification before COMMIT
+    const { rows: unitImbalances } = await client.query<{ unit: string; total: string }>(`
+      SELECT unit, SUM(amount) AS total
+      FROM postings
+      GROUP BY unit
+      HAVING SUM(amount) <> 0;
+    `);
+    if (unitImbalances.length > 0) {
+      throw new Error(`[SEED_ERROR] Global unit imbalance detected: ${JSON.stringify(unitImbalances)}`);
     }
 
     await client.query('COMMIT');

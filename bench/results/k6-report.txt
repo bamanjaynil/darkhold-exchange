@@ -1,22 +1,22 @@
 ================================================================================
                    DARKHOLD EXCHANGE — K6 LOAD BENCHMARK REPORT                 
 ================================================================================
-Timestamp:           2026-10-25T18:04:31.950Z
+Timestamp:           2026-10-26T10:48:01.662Z
 Target URL:          http://127.0.0.1:3000
 Concurrency:         50 VUs (constant-vus)
 Duration:            15s
 Instrument:          BENCH-X
 --------------------------------------------------------------------------------
 HTTP THROUGHPUT & STATUS:
-  Total Requests:    70168
-  Throughput:        4633.65 req/sec
+  Total Requests:    62293
+  Throughput:        4111.07 req/sec
   Error Rate:        0.00%
 --------------------------------------------------------------------------------
 LATENCY PERCENTILES (ms):
   Min:               0.60 ms
   Median (p50):      10.11 ms
-  p95:               18.03 ms
-  p99:               25.14 ms
-  Max:               270.44 ms
-  Avg:               10.54 ms
+  p95:               24.89 ms
+  p99:               36.06 ms
+  Max:               281.82 ms
+  Avg:               11.84 ms
 ================================================================================

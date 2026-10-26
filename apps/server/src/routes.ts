@@ -54,8 +54,11 @@ export function registerRoutes(
         req.url.startsWith('/api/auth/register') ||
         req.url.startsWith('/api/auth/logout') ||
         req.url.startsWith('/api/admin/reset-demo') ||
+        req.url.startsWith('/api/demo/reset') ||
+        req.url.startsWith('/api/admin/flush') ||
         req.url.startsWith('/api/faucet') ||
         req.url.startsWith('/api/wallet/faucet') ||
+        req.url.startsWith('/api/wallet/deposit') ||
         req.headers['x-bench-bypass'] === 'true' ||
         config.RATE_LIMIT_PROFILE === 'bench'
       ) {
@@ -166,6 +169,9 @@ export function registerRoutes(
       if (err.message === 'RATE_LIMITED') {
         return reply.status(429).send({ error: 'RATE_LIMITED' });
       }
+      if (err.message === 'USERNAME_TAKEN') {
+        return reply.status(409).send({ error: 'USERNAME_TAKEN', message: 'Username is already registered' });
+      }
       reply.status(400).send({ error: err.message || 'REGISTRATION_FAILED' });
     }
   });
@@ -176,11 +182,15 @@ export function registerRoutes(
       return reply.status(400).send({ error: 'INVALID_CREDENTIALS' });
     }
 
+    const bypassRateLimit =
+      req.headers['x-bench-bypass'] === 'true' || config.RATE_LIMIT_PROFILE === 'bench';
+
     try {
       const { user, sessionToken, csrfToken } = await auth.login(
         parsed.data.username,
         parsed.data.password,
-        req.ip
+        req.ip,
+        bypassRateLimit
       );
 
       const bal = core.getBalance(user.id);
@@ -531,7 +541,7 @@ export function registerRoutes(
     reply.send(list);
   });
 
-  server.post('/api/auctions/create', { preHandler: requireAuth }, async (req, reply) => {
+  const createAuctionHandler = async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = CreateAuctionSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: 'VALIDATION_ERROR', details: parsed.error.format() });
@@ -549,7 +559,10 @@ export function registerRoutes(
       return reply.status(400).send({ error: res.rejectedReason });
     }
     reply.send(res);
-  });
+  };
+
+  server.post('/api/auctions/create', { preHandler: requireAuth }, createAuctionHandler);
+  server.post('/api/auctions', { preHandler: requireAuth }, createAuctionHandler);
 
   server.post('/api/auctions/:id/buy', { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -760,6 +773,46 @@ export function registerRoutes(
     }
   });
 
+  server.post('/api/demo/reset', async (_req, reply) => {
+    if (config.MARKET_MODE === 'shared') {
+      return reply.status(403).send({ error: 'RESET_FORBIDDEN_IN_SHARED_MODE' });
+    }
+
+    try {
+      await performDemoReset(core, core.persistence['pool'], solvency);
+      reply.send({ success: true, message: 'Market state reset successfully.' });
+    } catch (err: any) {
+      reply.status(500).send({ error: err.message || 'RESET_FAILED' });
+    }
+  });
+
+  server.post('/api/admin/flush', async (_req, reply) => {
+    try {
+      await core.persistence.flush();
+      reply.send({ success: true, seq: core.seq });
+    } catch (err: any) {
+      reply.status(500).send({ error: err.message || 'FLUSH_FAILED' });
+    }
+  });
+
+  server.get('/api/ledger/recent', async (_req, reply) => {
+    const client = await core.persistence['pool'].connect();
+    try {
+      const { rows } = await client.query(`
+        SELECT j.id AS journal_id, j.kind, j.ref_type, j.ref_id, j.created_at,
+               p.id AS posting_id, p.account_id, p.unit, p.amount, p.seq,
+               la.kind AS account_kind, la.owner_user_id
+        FROM (SELECT * FROM journals ORDER BY created_at DESC LIMIT 50) j
+        JOIN postings p ON j.id = p.journal_id
+        LEFT JOIN ledger_accounts la ON p.account_id = la.id
+        ORDER BY j.created_at DESC, p.seq ASC
+      `);
+      reply.send({ success: true, count: rows.length, entries: rows });
+    } finally {
+      client.release();
+    }
+  });
+
   // --- 8. USER WALLET & LEDGER ---
 
   server.get('/api/wallet/balances', { preHandler: requireAuth }, async (req, reply) => {
@@ -874,22 +927,25 @@ export function registerRoutes(
     }
   });
 
-  server.post('/api/wallet/faucet', { preHandler: requireAuth }, async (req, reply) => {
+  const handleDeposit = async (req: FastifyRequest, reply: FastifyReply) => {
     const user = req.sessionUser!;
-    const body = (typeof req.body === 'object' && req.body !== null) ? (req.body as { amount?: number }) : {};
-    const amountDKC = Math.max(1, Math.min(100000, Number(body.amount) || 5000));
+    const body = (typeof req.body === 'object' && req.body !== null) ? (req.body as { amount?: number; method?: string; reference?: string }) : {};
+    const amountDKC = Math.max(100, Math.min(100000, Number(body.amount) || 5000));
     const amountMinor = Math.round(amountDKC * 100);
+    const method = body.method || 'GATEWAY';
+    const reference = body.reference || `ref_${crypto.randomBytes(4).toString('hex')}`;
 
     const client = await core.persistence['pool'].connect();
     try {
       await client.query('BEGIN');
-      const journalId = `j_faucet_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-      const seq = ++core.seq;
+      const journalId = `j_deposit_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const seq1 = ++core.seq;
+      const seq2 = ++core.seq;
 
       await client.query(
         `INSERT INTO journals (id, kind, ref_type, ref_id, created_at)
-         VALUES ($1, 'DEPOSIT', 'FAUCET', $2, NOW())`,
-        [journalId, user.id]
+         VALUES ($1, 'DEPOSIT', $2, $3, NOW())`,
+        [journalId, method, reference]
       );
 
       const userAccountId = `acc_${user.id}_cash_avail`;
@@ -915,8 +971,8 @@ export function registerRoutes(
           ($1, $2, 'CASH', $3, $4),
           ($1, $5, 'CASH', $6, $7)`,
         [
-          journalId, userAccountId, amountMinor, seq,
-          issuerAccountId, -amountMinor, seq + 1
+          journalId, userAccountId, amountMinor, seq1,
+          issuerAccountId, -amountMinor, seq2
         ]
       );
 
@@ -939,14 +995,18 @@ export function registerRoutes(
         success: true,
         amount: amountDKC,
         amountMinor,
+        method,
         balance: reconciled,
-        message: `Successfully deposited ${amountDKC.toLocaleString()} DKC into portfolio.`
+        message: `Successfully deposited ${amountDKC.toLocaleString()} DKC into portfolio via ${method}.`
       });
     } catch (err: any) {
       await client.query('ROLLBACK');
-      reply.status(500).send({ error: err.message || 'FAUCET_FAILED' });
+      reply.status(500).send({ error: err.message || 'DEPOSIT_FAILED' });
     } finally {
       client.release();
     }
-  });
+  };
+
+  server.post('/api/wallet/deposit', { preHandler: requireAuth }, handleDeposit);
+  server.post('/api/wallet/faucet', { preHandler: requireAuth }, handleDeposit);
 }

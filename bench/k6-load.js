@@ -23,10 +23,10 @@ const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:3000';
 
 export function setup() {
   const usersToLogin = [
-    { username: 'admin', password: 'admin_darkhold_2026' },
-    { username: 'bench_maker', password: 'demo_darkhold_2026' },
-    { username: 'bench_bot', password: 'demo_darkhold_2026' },
-    { username: 'bench_taker', password: 'demo_darkhold_2026' },
+    { username: 'admin', password: 'password123' },
+    { username: 'bench_maker', password: 'password123' },
+    { username: 'bench_bot', password: 'password123' },
+    { username: 'bench_taker', password: 'password123' },
   ];
 
   const authData = {};
@@ -101,6 +101,12 @@ export default function (data) {
 
   check(res, {
     'order accepted (200 or 201)': (r) => r.status === 200 || r.status === 201,
+  });
+}
+
+export function teardown() {
+  http.post(`${BASE_URL}/api/admin/flush`, null, {
+    headers: { 'x-bench-bypass': 'true' },
   });
 }
 

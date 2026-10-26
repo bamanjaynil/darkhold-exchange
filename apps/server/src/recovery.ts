@@ -68,6 +68,9 @@ export async function bootstrapCore(
       await hydrateFromDb(core, client);
     });
 
+    // Self-healing: Repair any unbalanced orphan journals or drifted cache tables before hydrating
+    await selfHealLedger(client);
+
     // 3. Hydrate state
     await hydrateFromDb(core, client);
 
@@ -83,6 +86,104 @@ export async function bootstrapCore(
     return core;
   } finally {
     client.release();
+  }
+}
+
+export async function selfHealLedger(client: pg.PoolClient): Promise<void> {
+  // 1. Detect and purge any unbalanced orphaned journals (e.g. from an unclean crash)
+  const { rows: unbalancedJournals } = await client.query<{ journal_id: string }>(`
+    SELECT journal_id
+    FROM postings
+    GROUP BY journal_id, unit
+    HAVING SUM(amount) <> 0
+  `);
+
+  if (unbalancedJournals.length > 0) {
+    console.warn(`[RECOVERY_SELF_HEAL] Detected ${unbalancedJournals.length} unbalanced journals. Purging orphaned postings...`);
+    for (const uj of unbalancedJournals) {
+      await client.query('DELETE FROM postings WHERE journal_id = $1', [uj.journal_id]);
+      await client.query('DELETE FROM journals WHERE id = $1', [uj.journal_id]);
+    }
+  }
+
+  // 2. Re-materialize balances from SUM(postings) for all users
+  const { rows: cashPostings } = await client.query<{
+    user_id: string;
+    kind: string;
+    total: string;
+  }>(`
+    SELECT la.owner_user_id AS user_id, la.kind, COALESCE(SUM(p.amount), 0) AS total
+    FROM ledger_accounts la
+    LEFT JOIN postings p ON la.id = p.account_id AND p.unit = 'CASH'
+    WHERE la.owner_user_id IS NOT NULL AND la.instrument_id IS NULL
+    GROUP BY la.owner_user_id, la.kind
+  `);
+
+  const userCashMap = new Map<string, { available: number; reserved: number; escrow: number }>();
+  for (const r of cashPostings) {
+    let b = userCashMap.get(r.user_id);
+    if (!b) {
+      b = { available: 0, reserved: 0, escrow: 0 };
+      userCashMap.set(r.user_id, b);
+    }
+    const amt = Number(r.total);
+    if (r.kind === 'USER_AVAILABLE') b.available = amt;
+    else if (r.kind === 'USER_RESERVED') b.reserved = amt;
+    else if (r.kind === 'ESCROW') b.escrow = amt;
+  }
+
+  for (const [userId, bal] of userCashMap.entries()) {
+    await client.query(`
+      INSERT INTO balances (user_id, available, reserved, escrow, updated_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (user_id) DO UPDATE SET
+        available = EXCLUDED.available,
+        reserved = EXCLUDED.reserved,
+        escrow = EXCLUDED.escrow,
+        updated_at = NOW()
+    `, [userId, bal.available, bal.reserved, bal.escrow]);
+  }
+
+  // 3. Re-materialize holdings from SUM(postings) for all user instrument holdings
+  const { rows: holdingPostings } = await client.query<{
+    user_id: string;
+    instrument_id: string;
+    kind: string;
+    total: string;
+  }>(`
+    SELECT la.owner_user_id AS user_id, la.instrument_id, la.kind, COALESCE(SUM(p.amount), 0) AS total
+    FROM ledger_accounts la
+    LEFT JOIN instruments i ON la.instrument_id = i.id
+    LEFT JOIN postings p ON la.id = p.account_id AND p.unit = i.symbol
+    WHERE la.owner_user_id IS NOT NULL AND la.instrument_id IS NOT NULL
+    GROUP BY la.owner_user_id, la.instrument_id, la.kind
+  `);
+
+  const userHoldingMap = new Map<string, { available: number; reserved: number; escrow: number }>();
+  for (const r of holdingPostings) {
+    const key = `${r.user_id}:${r.instrument_id}`;
+    let h = userHoldingMap.get(key);
+    if (!h) {
+      h = { available: 0, reserved: 0, escrow: 0 };
+      userHoldingMap.set(key, h);
+    }
+    const amt = Number(r.total);
+    if (r.kind === 'USER_AVAILABLE') h.available = amt;
+    else if (r.kind === 'USER_RESERVED') h.reserved = amt;
+    else if (r.kind === 'ESCROW') h.escrow = amt;
+  }
+
+  for (const [key, hold] of userHoldingMap.entries()) {
+    const [userId, instId] = key.split(':');
+    await client.query(`
+      INSERT INTO holdings (user_id, instrument_id, available, reserved, escrow, updated_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
+      ON CONFLICT (user_id, instrument_id) DO UPDATE SET
+        available = EXCLUDED.available,
+        reserved = EXCLUDED.reserved,
+        escrow = EXCLUDED.escrow,
+        updated_at = NOW()
+    `, [userId, instId, hold.available, hold.reserved, hold.escrow]);
   }
 }
 

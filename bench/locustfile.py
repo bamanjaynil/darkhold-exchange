@@ -3,14 +3,15 @@
 import itertools
 import os
 import time
-from datetime import datetime
+import urllib.request
+from datetime import datetime, timezone
 from locust import FastHttpUser, task, between, events
 
 DEMO_USERS = [
-    {"username": "admin", "password": "admin_darkhold_2026"},
-    {"username": "bench_maker", "password": "demo_darkhold_2026"},
-    {"username": "bench_bot", "password": "demo_darkhold_2026"},
-    {"username": "bench_taker", "password": "demo_darkhold_2026"},
+    {"username": "admin", "password": "password123"},
+    {"username": "bench_maker", "password": "password123"},
+    {"username": "bench_bot", "password": "password123"},
+    {"username": "bench_taker", "password": "password123"},
 ]
 
 user_cycler = itertools.cycle(DEMO_USERS)
@@ -30,7 +31,7 @@ class DarkholdExchangeUser(FastHttpUser):
         login_res = self.client.post(
             "/api/auth/login",
             json=self.user_creds,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "x-bench-bypass": "true"},
         )
         if login_res.status_code != 200:
             raise RuntimeError(f"Login failed for {self.username}: {login_res.text}")
@@ -107,6 +108,14 @@ class DarkholdExchangeUser(FastHttpUser):
 @events.test_stop.add_listener
 def on_test_stop(environment, **kwargs):
     """Generates clean summary report to bench/results/locust-report.txt upon test completion."""
+    # Ensure background persistence flushes all queued batches
+    try:
+        host = environment.host or "http://127.0.0.1:3000"
+        req = urllib.request.Request(f"{host}/api/admin/flush", data=b"{}", headers={"Content-Type": "application/json", "x-bench-bypass": "true"})
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass
+
     stats = environment.runner.stats
     total = stats.total
     results_dir = os.path.join(os.path.dirname(__file__), "results")
@@ -126,7 +135,7 @@ def on_test_stop(environment, **kwargs):
         "================================================================================",
         "                 DARKHOLD EXCHANGE — LOCUST LOAD BENCHMARK REPORT               ",
         "================================================================================",
-        f"Timestamp:           {datetime.utcnow().isoformat()}Z",
+        f"Timestamp:           {datetime.now(timezone.utc).isoformat()}",
         f"Target Host:         {environment.host}",
         f"Total Requests:      {total.num_requests}",
         f"Total Failures:      {total.num_failures} ({fail_rate}%)",

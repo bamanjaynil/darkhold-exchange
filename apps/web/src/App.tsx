@@ -643,7 +643,7 @@ export default function App() {
   };
 
   // --- Faucet / Deposit Top-Up Handler ---
-  const handleTopUpDKC = async (amountDKC: number) => {
+  const handleTopUpDKC = async (amountDKC: number, method: 'UPI' | 'CARD' | 'NETBANKING' = 'UPI') => {
     if (!user) {
       setShowAuthModal(true);
       return;
@@ -651,25 +651,25 @@ export default function App() {
     setFaucetLoading(true);
     setFaucetMessage(null);
     try {
-      const res = await fetch('/api/faucet', {
+      const res = await fetch('/api/wallet/deposit', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
         },
         credentials: 'include',
-        body: JSON.stringify({ amount: amountDKC }),
+        body: JSON.stringify({ amount: amountDKC, method }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         if (data.balance) {
           setBalance(data.balance);
         }
-        setFaucetMessage(`✓ Successfully credited +${amountDKC.toLocaleString()} DKC into available balance!`);
+        setFaucetMessage(`✓ Successfully deposited +${amountDKC.toLocaleString()} DKC into available balance via ${method}!`);
         await fetchSession();
         void syncMarketState();
       } else {
-        setFaucetMessage(`Error: ${data.error || 'Failed to top up DKC'}`);
+        setFaucetMessage(`Error: ${data.error || 'Failed to deposit DKC'}`);
       }
     } catch (err: any) {
       setFaucetMessage(`Network error: ${err.message}`);
@@ -3542,7 +3542,7 @@ export default function App() {
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 6 }}>
                     <button
                       type="button"
-                      onClick={() => handleOneClickLogin('admin', 'admin_darkhold_2026')}
+                      onClick={() => handleOneClickLogin('admin', 'password123')}
                       disabled={authLoading}
                       style={{
                         background: 'rgba(245, 158, 11, 0.15)',
@@ -3560,7 +3560,7 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleOneClickLogin('alice', 'demo_darkhold_2026')}
+                      onClick={() => handleOneClickLogin('alice', 'password123')}
                       disabled={authLoading}
                       style={{
                         background: 'rgba(0, 240, 255, 0.15)',
@@ -3578,7 +3578,7 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleOneClickLogin('bob', 'demo_darkhold_2026')}
+                      onClick={() => handleOneClickLogin('bob', 'password123')}
                       disabled={authLoading}
                       style={{
                         background: 'rgba(16, 185, 129, 0.15)',
@@ -3596,7 +3596,7 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleOneClickLogin('carol', 'demo_darkhold_2026')}
+                      onClick={() => handleOneClickLogin('carol', 'password123')}
                       disabled={authLoading}
                       style={{
                         background: 'rgba(168, 85, 247, 0.15)',
@@ -3626,29 +3626,29 @@ export default function App() {
                   }}
                 >
                   <div style={{ fontWeight: 700, color: '#F8FAFC', marginBottom: 2 }}>💡 PRE-SEEDED CREDENTIALS:</div>
-                  <div>• <strong style={{ color: '#F59E0B' }}>admin</strong> : <code>admin_darkhold_2026</code> (Admin Diagnostics & Solvency)</div>
-                  <div>• <strong style={{ color: '#00F0FF' }}>alice</strong> / <strong style={{ color: '#10B981' }}>bob</strong> / <strong style={{ color: '#A855F7' }}>carol</strong> : <code>demo_darkhold_2026</code> (Traders)</div>
+                  <div>• <strong style={{ color: '#F59E0B' }}>admin</strong> : <code>password123</code> (Admin Diagnostics & Solvency)</div>
+                  <div>• <strong style={{ color: '#00F0FF' }}>alice</strong> / <strong style={{ color: '#10B981' }}>bob</strong> / <strong style={{ color: '#A855F7' }}>carol</strong> : <code>password123</code> (Pre-Seeded Traders)</div>
                 </div>
               </div>
             )}
 
-            {/* Starter Grant Banner in Register Mode */}
+            {/* Anti-Sybil Protocol Notice in Register Mode */}
             {authMode === 'register' && (
               <div
                 style={{
-                  background: 'rgba(16, 185, 129, 0.1)',
-                  border: '1px solid rgba(16, 185, 129, 0.35)',
+                  background: 'rgba(0, 240, 255, 0.08)',
+                  border: '1px solid rgba(0, 240, 255, 0.3)',
                   borderRadius: 6,
                   padding: '10px 12px',
                   marginBottom: 14,
                   fontSize: 11,
                 }}
               >
-                <div style={{ fontWeight: 800, color: '#10B981', marginBottom: 4 }}>
-                  🎁 WELCOME STARTER GRANT INCLUDED
+                <div style={{ fontWeight: 800, color: '#00F0FF', marginBottom: 4 }}>
+                  🛡️ ANTI-SYBIL ECONOMIC PROTOCOL
                 </div>
                 <div style={{ color: '#CBD5E1', fontSize: 10, lineHeight: 1.4 }}>
-                  New trader accounts automatically receive <strong style={{ color: '#10B981' }}>25,000.00 DKC</strong> + <strong style={{ color: '#00F0FF' }}>10 FEST-GA</strong> + <strong style={{ color: '#F59E0B' }}>5 MERCH-CLOAK</strong> deposited directly into verified double-entry ledger accounts!
+                  New accounts initialize with strictly <strong style={{ color: '#00F0FF' }}>0.00 DKC</strong> and zero inventory to prevent market drain attacks. After signing up, use the <strong style={{ color: '#10B981' }}>Instant UPI / Card Deposit Gateway</strong> in your Portfolio to fund your wallet.
                 </div>
               </div>
             )}
@@ -3672,7 +3672,7 @@ export default function App() {
                   type="password"
                   value={authPassword}
                   onChange={(e) => setAuthPassword(e.target.value)}
-                  placeholder="Minimum 6 characters"
+                  placeholder="Minimum 4 characters"
                   required
                   style={{ width: '100%' }}
                 />

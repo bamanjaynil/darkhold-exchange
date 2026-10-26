@@ -92,7 +92,7 @@ export const RegisterUserSchema = z.object({
     .min(3, 'Username must be at least 3 characters')
     .max(32, 'Username cannot exceed 32 characters')
     .regex(/^[a-zA-Z0-9_-]+$/, 'Username must contain only alphanumeric characters, underscores or hyphens'),
-  password: z.string().min(6, 'Password must be at least 6 characters long'),
+  password: z.string().min(4, 'Password must be at least 4 characters long'),
   role: z.enum(['user', 'admin']).optional().default('user'),
   profile: z.string().optional().default('standard'),
 });
