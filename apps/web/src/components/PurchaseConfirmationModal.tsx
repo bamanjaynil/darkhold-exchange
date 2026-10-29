@@ -43,6 +43,16 @@ export const PurchaseConfirmationModal: React.FC<PurchaseConfirmationModalProps>
     ticketCode?: string;
   } | null>(null);
 
+  // Reset internal state cleanly whenever new purchase data is loaded
+  React.useEffect(() => {
+    if (data) {
+      setReceiptData(null);
+      setErrorMessage('');
+      setSubmitting(false);
+      setCopied(false);
+    }
+  }, [data]);
+
   if (!data) return null;
 
   const totalCostDkc = data.unitPriceDkc * data.quantity;
@@ -82,14 +92,40 @@ export const PurchaseConfirmationModal: React.FC<PurchaseConfirmationModalProps>
     }
   };
 
-  const handleCopyOtp = () => {
-    if (!receiptData) return;
-    navigator.clipboard?.writeText(receiptData.pickupOtp);
+  const handleCopyOtp = async () => {
+    if (!receiptData?.pickupOtp) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(receiptData.pickupOtp);
+      } else {
+        const textArea = document.createElement('textarea');
+        textArea.value = receiptData.pickupOtp;
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+      }
+    } catch {}
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleClose = () => {
+    if (submitting) return;
+    setReceiptData(null);
+    setErrorMessage('');
+    setSubmitting(false);
+    setCopied(false);
+    onClose();
+  };
+
   const handleDone = () => {
+    setReceiptData(null);
+    setErrorMessage('');
+    setSubmitting(false);
+    setCopied(false);
     onClose();
     if (onSuccessDone) onSuccessDone();
   };
@@ -142,7 +178,7 @@ export const PurchaseConfirmationModal: React.FC<PurchaseConfirmationModalProps>
               </div>
               <button
                 type="button"
-                onClick={onClose}
+                onClick={handleClose}
                 disabled={submitting}
                 style={{ background: 'transparent', border: 'none', color: '#64748B', fontSize: 18, cursor: 'pointer' }}
               >
@@ -294,7 +330,7 @@ export const PurchaseConfirmationModal: React.FC<PurchaseConfirmationModalProps>
             <div style={{ display: 'flex', gap: 10 }}>
               <button
                 type="button"
-                onClick={onClose}
+                onClick={handleClose}
                 disabled={submitting}
                 style={{
                   flex: 1,
@@ -340,6 +376,26 @@ export const PurchaseConfirmationModal: React.FC<PurchaseConfirmationModalProps>
           /* SCREEN 2: POST-PURCHASE TRANSACTION RECEIPT & HANDOVER OTP     */
           /* ============================================================== */
           <div>
+            {/* Top Close Button on Receipt Screen */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 2 }}>
+              <button
+                type="button"
+                onClick={handleDone}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: '#64748B',
+                  fontSize: 18,
+                  cursor: 'pointer',
+                  padding: '2px 6px',
+                  borderRadius: 4,
+                }}
+                title="Close and view in portfolio"
+              >
+                ✕
+              </button>
+            </div>
+
             <div style={{ textAlign: 'center', marginBottom: 18 }}>
               <div style={{ fontSize: 36, marginBottom: 6 }}>✅</div>
               <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900, color: '#10B981', letterSpacing: '0.04em' }}>
@@ -404,13 +460,13 @@ export const PurchaseConfirmationModal: React.FC<PurchaseConfirmationModalProps>
               {/* Rendered Visual Verification QR Badge */}
               <div style={{ display: 'flex', justifyContent: 'center', margin: '10px 0 6px 0' }}>
                 <svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <rect width="100" height="100" rx="6" fill="#040907" stroke="#10B981" stroke-width="2"/>
+                  <rect width="100" height="100" rx="6" fill="#040907" stroke="#10B981" strokeWidth={2}/>
                   {/* Outer target corners */}
-                  <rect x="8" y="8" width="24" height="24" rx="3" fill="none" stroke="#10B981" stroke-width="3"/>
+                  <rect x="8" y="8" width="24" height="24" rx="3" fill="none" stroke="#10B981" strokeWidth={3}/>
                   <rect x="14" y="14" width="12" height="12" fill="#10B981"/>
-                  <rect x="68" y="8" width="24" height="24" rx="3" fill="none" stroke="#10B981" stroke-width="3"/>
+                  <rect x="68" y="8" width="24" height="24" rx="3" fill="none" stroke="#10B981" strokeWidth={3}/>
                   <rect x="74" y="14" width="12" height="12" fill="#10B981"/>
-                  <rect x="8" y="68" width="24" height="24" rx="3" fill="none" stroke="#10B981" stroke-width="3"/>
+                  <rect x="8" y="68" width="24" height="24" rx="3" fill="none" stroke="#10B981" strokeWidth={3}/>
                   <rect x="14" y="74" width="12" height="12" fill="#10B981"/>
                   {/* Cyber matrix blocks */}
                   <rect x="40" y="12" width="8" height="8" fill="#10B981"/>
@@ -448,7 +504,7 @@ export const PurchaseConfirmationModal: React.FC<PurchaseConfirmationModalProps>
                     fontFamily: '"JetBrains Mono", monospace',
                   }}
                 >
-                  {copied ? '✓ COPIED TO CLIPBOARD' : '📋 COPY 6-DIGIT OTP'}
+                  {copied ? '✓ COPIED TO CLIPBOARD!' : '📋 COPY 6-DIGIT OTP'}
                 </button>
               </div>
             </div>

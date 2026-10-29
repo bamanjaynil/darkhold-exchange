@@ -542,102 +542,117 @@ export default function App() {
   }, [selectedSymbol, user?.id]);
 
   // --- Universal High-Speed Order Dispatch (with Web Worker PoW) ---
-  const dispatchOrderDirect = async (params: {
+  const dispatchOrderDirect = (params: {
     symbol: string;
     side: 'BUY' | 'SELL';
     price?: number;
     qty: number;
     type: string;
     tif?: string;
-  }) => {
-    if (!user) {
-      setShowAuthModal(true);
-      return;
-    }
-
-    setOrderSubmitting(true);
-    setOrderMessage(null);
-
-    try {
-      const curInst = instruments.find((i) => i.symbol === params.symbol);
-      const ceiling = curInst ? calculateCollarCeiling(curInst.faceValue, curInst.collarBps) : 165000;
-
-      if (params.type === 'LIMIT' && params.price && params.price > ceiling) {
-        setOrderMessage({ text: `Price exceeds anti-scalping collar ceiling of ${formatDKC(ceiling)}`, error: true });
-        setOrderSubmitting(false);
+  }): Promise<{ success: boolean; data?: any; error?: string }> => {
+    return new Promise(async (resolve) => {
+      if (!user) {
+        setShowAuthModal(true);
+        resolve({ success: false, error: 'Authentication required' });
         return;
       }
 
-      // Fetch PoW challenge
-      const chalRes = await fetch('/api/pow/challenge');
-      if (!chalRes.ok) {
-        throw new Error('Failed to obtain PoW challenge from server');
-      }
-      const challenge = await chalRes.json();
+      setOrderSubmitting(true);
+      setOrderMessage(null);
 
-      // Solve in Web Worker
-      const worker = new Worker(new URL('./pow-worker.ts', import.meta.url), { type: 'module' });
-      worker.onerror = (we) => {
-        worker.terminate();
-        setOrderSubmitting(false);
-        setOrderMessage({ text: 'PoW Worker error: ' + (we.message || 'Worker failure'), error: true });
-      };
+      try {
+        const curInst = instruments.find((i) => i.symbol === params.symbol);
+        const ceiling = curInst ? calculateCollarCeiling(curInst.faceValue, curInst.collarBps) : 165000;
 
-      worker.postMessage({ seed: challenge.seed, difficultyBits: challenge.difficultyBits });
-
-      worker.onmessage = async (we) => {
-        const { nonce } = we.data;
-        worker.terminate();
-
-        try {
-          const orderPayload = {
-            clientOrderId: `web_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
-            symbol: params.symbol,
-            side: params.side,
-            type: params.type,
-            tif: params.tif || 'GTC',
-            price: params.price,
-            qty: params.qty,
-            pow: {
-              challengeId: challenge.challengeId,
-              nonce,
-            },
-          };
-
-          const res = await fetch('/api/orders', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-csrf-token': csrfToken,
-            },
-            credentials: 'include',
-            body: JSON.stringify(orderPayload),
-          });
-
-          const data = await res.json().catch(() => ({}));
-          if (res.ok) {
-            const tradeCount = data.trades?.length || 0;
-            setOrderMessage({
-              text: tradeCount > 0
-                ? `⚡ Instant Match SUCCESS: Executed ${tradeCount} trade(s) on ${params.symbol}!`
-                : `✓ Order ${data.restingOrder ? 'resting in book' : 'executed'} successfully! Seq #${data.seq}`,
-              error: false,
-            });
-            await fetchSession();
-            void syncMarketState();
-          } else {
-            setOrderMessage({ text: data.error || 'Order rejected by exchange', error: true });
-          }
-        } catch (err: any) {
-          setOrderMessage({ text: err.message || 'Network error submitting order', error: true });
-        } finally {
+        if (params.type === 'LIMIT' && params.price && params.price > ceiling) {
+          const errText = `Price exceeds anti-scalping collar ceiling of ${formatDKC(ceiling)}`;
+          setOrderMessage({ text: errText, error: true });
           setOrderSubmitting(false);
+          resolve({ success: false, error: errText });
+          return;
         }
-      };
-    } catch (err: any) {
-      setOrderSubmitting(false);
-      setOrderMessage({ text: err.message || 'Error submitting order', error: true });
-    }
+
+        // Fetch PoW challenge
+        const chalRes = await fetch('/api/pow/challenge');
+        if (!chalRes.ok) {
+          throw new Error('Failed to obtain PoW challenge from server');
+        }
+        const challenge = await chalRes.json();
+
+        // Solve in Web Worker
+        const worker = new Worker(new URL('./pow-worker.ts', import.meta.url), { type: 'module' });
+        worker.onerror = (we) => {
+          worker.terminate();
+          setOrderSubmitting(false);
+          const errText = 'PoW Worker error: ' + (we.message || 'Worker failure');
+          setOrderMessage({ text: errText, error: true });
+          resolve({ success: false, error: errText });
+        };
+
+        worker.postMessage({ seed: challenge.seed, difficultyBits: challenge.difficultyBits });
+
+        worker.onmessage = async (we) => {
+          const { nonce } = we.data;
+          worker.terminate();
+
+          try {
+            const orderPayload = {
+              clientOrderId: `web_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+              symbol: params.symbol,
+              side: params.side,
+              type: params.type,
+              tif: params.tif || 'GTC',
+              price: params.price,
+              qty: params.qty,
+              pow: {
+                challengeId: challenge.challengeId,
+                nonce,
+              },
+            };
+
+            const res = await fetch('/api/orders', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-csrf-token': csrfToken,
+              },
+              credentials: 'include',
+              body: JSON.stringify(orderPayload),
+            });
+
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) {
+              const tradeCount = data.trades?.length || 0;
+              setOrderMessage({
+                text: tradeCount > 0
+                  ? `⚡ Instant Match SUCCESS: Executed ${tradeCount} trade(s) on ${params.symbol}!`
+                  : `✓ Order ${data.restingOrder ? 'resting in book' : 'executed'} successfully! Seq #${data.seq}`,
+                error: false,
+              });
+              await fetchSession();
+              await fetchHoldings();
+              void syncMarketState();
+              resolve({ success: true, data });
+            } else {
+              const errText = data.error || 'Order rejected by exchange';
+              setOrderMessage({ text: errText, error: true });
+              resolve({ success: false, error: errText });
+            }
+          } catch (err: any) {
+            const errText = err.message || 'Network error submitting order';
+            setOrderMessage({ text: errText, error: true });
+            resolve({ success: false, error: errText });
+          } finally {
+            setOrderSubmitting(false);
+          }
+        };
+      } catch (err: any) {
+        setOrderSubmitting(false);
+        const errText = err.message || 'Error submitting order';
+        setOrderMessage({ text: errText, error: true });
+        resolve({ success: false, error: errText });
+      }
+    });
   };
 
   // --- Tactical Book Sniping ---
@@ -703,7 +718,7 @@ export default function App() {
         sellerName: 'Student Resale Market OrderBook',
         isEscrow: !!selectedInstrument?.escrowRequired,
         onConfirm: async () => {
-          await dispatchOrderDirect({
+          const res = await dispatchOrderDirect({
             symbol: selectedSymbol,
             side,
             price: priceMinor,
@@ -711,11 +726,21 @@ export default function App() {
             type: orderType,
             tif,
           });
-          return {
-            success: true,
-            journalId: `TXN #L2-${Math.floor(10000 + Math.random() * 90000)}`,
-            pickupToken: `PK-${Math.floor(100000 + Math.random() * 900000)}`,
-          };
+          if (res.success) {
+            await fetchSession();
+            await fetchHoldings();
+            await syncMarketState();
+            return {
+              success: true,
+              journalId: `TXN #L2-${res.data?.seq || Math.floor(10000 + Math.random() * 90000)}`,
+              pickupToken: `PK-${Math.floor(100000 + Math.random() * 900000)}`,
+            };
+          } else {
+            return {
+              success: false,
+              error: res.error || 'Order placement rejected',
+            };
+          }
         },
       });
       return;
@@ -987,11 +1012,13 @@ export default function App() {
         if (res.ok) {
           const aucRes = await fetch('/api/auctions').catch(() => null);
           if (aucRes && aucRes.ok) setAuctions(await aucRes.json());
-          syncMarketState();
+          await syncMarketState();
+          await fetchSession();
+          await fetchHoldings();
           return {
             success: true,
             journalId: `TXN #AUC-${data.seq || Math.floor(10000 + Math.random() * 90000)}`,
-            pickupToken: `PK-${Math.abs((data.seq || 94821) * 7919 + 849204) % 900000 + 100000}`,
+            pickupToken: data.pickupToken || data.otp || `PK-${Math.abs((data.seq || 94821) * 7919 + 849204) % 900000 + 100000}`,
           };
         } else {
           return {
@@ -1247,6 +1274,7 @@ export default function App() {
           onPurchaseSuccess={() => {
             fetchSession();
             fetchHoldings();
+            setActiveTab('wallet');
           }}
         />
       )}
@@ -4688,9 +4716,16 @@ export default function App() {
         availableBalanceDkc={balance.available / 100}
         onClose={() => setConfirmPurchaseData(null)}
         onSuccessDone={() => {
+          const isEscrow = confirmPurchaseData?.isEscrow;
           setConfirmPurchaseData(null);
           syncMarketState();
           fetchSession();
+          fetchHoldings();
+          if (isEscrow) {
+            setActiveTab('escrows');
+          } else {
+            setActiveTab('wallet');
+          }
         }}
       />
     </div>

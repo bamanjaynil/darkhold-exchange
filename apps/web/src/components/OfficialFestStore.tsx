@@ -1663,7 +1663,10 @@ export const OfficialFestStore: React.FC<OfficialFestStoreProps> = ({
         data={confirmPurchaseData}
         availableBalanceDkc={availableDKC}
         onClose={() => setConfirmPurchaseData(null)}
-        onSuccessDone={() => setConfirmPurchaseData(null)}
+        onSuccessDone={() => {
+          setConfirmPurchaseData(null);
+          onPurchaseSuccess();
+        }}
       />
     </div>
   );
