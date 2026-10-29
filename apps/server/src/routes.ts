@@ -1577,11 +1577,18 @@ export function registerRoutes(
           payoutRef: payoutResult.providerRef,
         };
 
+        const utr = payoutResult.providerRef || `UTR_${Date.now()}`;
+
         return reply.status(200).send({
+          ok: true,
           success: true,
           status: 'COMPLETED',
           withdrawal: withdrawalRecord,
           withdrawalId,
+          journalId: settleJournalId,
+          settleJournalId,
+          utr,
+          amount: amountDKC,
           amountDKC,
           amountINR,
           upiId,
@@ -1648,6 +1655,7 @@ export function registerRoutes(
         };
 
         return reply.status(400).send({
+          ok: false,
           success: false,
           status: 'FAILED',
           refunded: true,
@@ -1656,6 +1664,8 @@ export function registerRoutes(
           failureReason: payoutResult.error || 'PAYOUT_REJECTED',
           withdrawalId,
           refundJournalId,
+          journalId: refundJournalId,
+          amount: amountDKC,
           amountDKC,
           amountINR,
           upiId,

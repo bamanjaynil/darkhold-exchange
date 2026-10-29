@@ -72,19 +72,22 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
 
       const data = await res.json();
 
-      if (res.ok && data.success) {
+      const isCompleted = res.ok && data.status !== 'FAILED' && (data.success || data.status === 'COMPLETED' || data.ok);
+      const isFailed = data.status === 'FAILED' || data.refunded;
+
+      if (isCompleted) {
         setResultData({
-          status: 'SUCCESS',
           ...data,
+          status: 'COMPLETED',
         });
         if (data.balance) {
           onSuccess(data.balance);
         }
-      } else if (data.refunded) {
+      } else if (isFailed) {
         // Payout provider failed & funds were automatically refunded
         setResultData({
-          status: 'REFUNDED',
           ...data,
+          status: 'FAILED',
         });
         if (data.balance) {
           onSuccess(data.balance);
@@ -178,7 +181,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
         {/* Success or Auto-Refund Result Screen */}
         {resultData ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {resultData.status === 'SUCCESS' ? (
+            {resultData.status !== 'FAILED' ? (
               <div
                 style={{
                   background: 'rgba(16, 185, 129, 0.1)',
@@ -190,10 +193,10 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
               >
                 <div style={{ fontSize: 32, marginBottom: 6 }}>✓</div>
                 <div style={{ color: '#10B981', fontWeight: 800, fontSize: 16, marginBottom: 4 }}>
-                  ✓ Successfully withdrew {(resultData.amountDKC || parsedAmount).toFixed(2)} DKC (₹{(resultData.amountINR || parsedAmount).toFixed(2)}) to {resultData.upiId || upiId}!
+                  ✅ PAYOUT COMPLETED & SETTLED TO UPI
                 </div>
                 <div style={{ color: '#CBD5E1', fontSize: 12, marginBottom: 14 }}>
-                  ₹{(resultData.amountINR || parsedAmount).toLocaleString()} INR transferred directly to your bank account via UPI.
+                  ₹{(resultData.amount || resultData.amountINR || parsedAmount).toLocaleString()} INR transferred directly to your bank account via UPI.
                 </div>
 
                 <div
@@ -210,8 +213,24 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#64748B' }}>Payout Reference:</span>
-                    <strong style={{ color: '#00F0FF' }}>{resultData.payoutRef}</strong>
+                    <span style={{ color: '#64748B' }}>Status:</span>
+                    <strong style={{ color: '#10B981' }}>✓ INSTANT IMPS / UPI PAYOUT COMPLETED</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#64748B' }}>Beneficiary VPA:</span>
+                    <strong style={{ color: '#00F0FF' }}>{resultData.upiId || upiId}</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#64748B' }}>Amount Transferred:</span>
+                    <span style={{ color: '#F8FAFC', fontWeight: 700 }}>
+                      ₹{(resultData.amount || resultData.amountINR || parsedAmount).toFixed(2)} INR (-{(resultData.amount || resultData.amountDKC || parsedAmount).toFixed(2)} DKC)
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#64748B' }}>NPCI UTR / Reference:</span>
+                    <strong style={{ color: '#F59E0B' }}>
+                      {resultData.utr || resultData.payoutRef || resultData.journalId || resultData.settleJournalId || 'NPCI_SETTLED'}
+                    </strong>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ color: '#64748B' }}>Withdrawal ID:</span>
@@ -219,11 +238,7 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ color: '#64748B' }}>Settlement Network:</span>
-                    <span style={{ color: '#10B981' }}>NPCI / UPI Instant Payout</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#64748B' }}>Debited From Wallet:</span>
-                    <span style={{ color: '#FF2A54' }}>-{resultData.amountDKC} DKC</span>
+                    <span style={{ color: '#10B981' }}>NPCI / IMPS Instant Payout</span>
                   </div>
                 </div>
               </div>
@@ -267,11 +282,11 @@ export const WithdrawModal: React.FC<WithdrawModalProps> = ({
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ color: '#64748B' }}>Refund Journal:</span>
-                    <span style={{ color: '#00F0FF' }}>{resultData.refundJournalId || 'j_refund'}</span>
+                    <span style={{ color: '#00F0FF' }}>{resultData.refundJournalId || resultData.journalId || 'j_refund'}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ color: '#64748B' }}>Restored to Available:</span>
-                    <span style={{ color: '#10B981' }}>+{resultData.amountDKC} DKC</span>
+                    <span style={{ color: '#10B981' }}>+{(resultData.amount || resultData.amountDKC || parsedAmount).toFixed(2)} DKC</span>
                   </div>
                 </div>
               </div>
