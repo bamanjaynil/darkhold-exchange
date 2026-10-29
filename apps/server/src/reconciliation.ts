@@ -53,17 +53,18 @@ export async function runReconciliation(
       GROUP BY la.owner_user_id, la.kind
     `);
 
-    const computedBalances = new Map<string, { available: number; reserved: number; escrow: number }>();
+    const computedBalances = new Map<string, { available: number; reserved: number; escrow: number; pendingWithdrawals: number }>();
     for (const r of cashRows) {
       let b = computedBalances.get(r.owner_user_id);
       if (!b) {
-        b = { available: 0, reserved: 0, escrow: 0 };
+        b = { available: 0, reserved: 0, escrow: 0, pendingWithdrawals: 0 };
         computedBalances.set(r.owner_user_id, b);
       }
       const amt = Number(r.total);
       if (r.kind === 'USER_AVAILABLE') b.available = amt;
       else if (r.kind === 'USER_RESERVED') b.reserved = amt;
       else if (r.kind === 'ESCROW') b.escrow = amt;
+      else if (r.kind === 'PENDING_WITHDRAWAL') b.pendingWithdrawals = amt;
     }
 
     // 3. Compare with DB Balances Cache
@@ -75,7 +76,7 @@ export async function runReconciliation(
     }>('SELECT user_id, available, reserved, escrow FROM balances');
 
     for (const r of dbBalRows) {
-      const comp = computedBalances.get(r.user_id) || { available: 0, reserved: 0, escrow: 0 };
+      const comp = computedBalances.get(r.user_id) || { available: 0, reserved: 0, escrow: 0, pendingWithdrawals: 0 };
       if (Number(r.available) !== comp.available) {
         anomalies.push(
           `[BALANCE_CACHE_DIVERGENCE] User ${r.user_id} available cache ${r.available} != ledger ${comp.available}`

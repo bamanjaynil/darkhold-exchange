@@ -20,7 +20,7 @@ export async function setupTestDatabase(): Promise<pg.Pool> {
       DO $$
       BEGIN
         IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'orders') THEN
-          TRUNCATE orders, trades, escrows, auctions, journals, postings, balances, holdings, ledger_accounts, users, sessions CASCADE;
+          TRUNCATE orders, trades, escrows, auctions, deposits, withdrawals, journals, postings, balances, holdings, ledger_accounts, users, sessions, organizations, organization_memberships, products, product_variants, drops, drop_items, events, ticket_tiers, store_orders, store_order_items, issued_tickets, community_listings CASCADE;
         END IF;
       END $$;
     `);
@@ -38,7 +38,7 @@ export async function setupTestDatabase(): Promise<pg.Pool> {
 export async function resetTestDatabase(pool: pg.Pool): Promise<void> {
   const client = await pool.connect();
   try {
-    await client.query('TRUNCATE orders, trades, escrows, auctions, journals, postings, balances, holdings CASCADE');
+    await client.query('TRUNCATE orders, trades, escrows, auctions, deposits, withdrawals, journals, postings, balances, holdings, organizations, organization_memberships, products, product_variants, drops, drop_items, events, ticket_tiers, store_orders, store_order_items, issued_tickets, community_listings CASCADE');
     await runSeed(TEST_DB_URL);
   } finally {
     client.release();

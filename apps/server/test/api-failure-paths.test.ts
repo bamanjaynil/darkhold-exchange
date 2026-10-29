@@ -301,4 +301,80 @@ describe('API Routes, Authentication & Failure-Path Integration Suite', () => {
       expect(failData.error).toBe('INVALID_OTP');
     });
   });
+
+  describe('4. Official Drops & Escrow OTP Handover Verification', () => {
+    it('strictly forbids regular students from launching official drops (403 Forbidden)', async () => {
+      const loginAlice = await server.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        headers: { 'Content-Type': 'application/json' },
+        payload: { username: 'alice', password: 'demo_darkhold_2026' },
+      });
+      const sessionAlice = loginAlice.cookies.find((c) => c.name === 'dk_session')!;
+      const csrfAlice = loginAlice.cookies.find((c) => c.name === 'dk_csrf')!;
+
+      const res = await server.inject({
+        method: 'POST',
+        url: '/api/drops',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfAlice.value,
+        },
+        cookies: {
+          dk_session: sessionAlice.value,
+          dk_csrf: csrfAlice.value,
+        },
+        payload: {
+          title: 'Unauthorized Student Drop',
+          symbol: 'FEST-GA',
+          imageUrl: 'data:image/jpeg;base64,mock',
+        },
+      });
+
+      expect(res.statusCode).toBe(403);
+      const data = JSON.parse(res.payload);
+      expect(data.error).toContain('FORBIDDEN');
+    });
+
+    it('allows admin / official club to launch official drops and persist imageUrl', async () => {
+      const loginAdmin = await server.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        headers: { 'Content-Type': 'application/json' },
+        payload: { username: 'admin', password: 'password123' },
+      });
+      const sessionAdmin = loginAdmin.cookies.find((c) => c.name === 'dk_session')!;
+      const csrfAdmin = loginAdmin.cookies.find((c) => c.name === 'dk_csrf')!;
+
+      const res = await server.inject({
+        method: 'POST',
+        url: '/api/drops',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfAdmin.value,
+        },
+        cookies: {
+          dk_session: sessionAdmin.value,
+          dk_csrf: csrfAdmin.value,
+        },
+        payload: {
+          title: 'Official Spring Cyberpunk Drop',
+          symbol: 'MERCH-CLOAK',
+          imageUrl: 'https://darkhold.mnnit.ac.in/uploads/cloak.jpg',
+        },
+      });
+
+      expect(res.statusCode).toBe(201);
+      const data = JSON.parse(res.payload);
+      expect(data.success).toBe(true);
+
+      // Verify GET /api/instruments returns imageUrl
+      const instRes = await server.inject({ method: 'GET', url: '/api/instruments' });
+      expect(instRes.statusCode).toBe(200);
+      const insts = JSON.parse(instRes.payload);
+      const cloak = insts.find((i: any) => i.symbol === 'MERCH-CLOAK');
+      expect(cloak).toBeDefined();
+      expect(cloak.imageUrl).toBe('https://darkhold.mnnit.ac.in/uploads/cloak.jpg');
+    });
+  });
 });

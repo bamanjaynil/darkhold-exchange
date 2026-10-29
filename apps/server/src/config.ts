@@ -4,7 +4,6 @@
  */
 
 import { z } from 'zod';
-// Native Node.js env loader
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -78,3 +77,30 @@ try {
 }
 
 export const config = parsedConfig;
+
+/**
+ * Darkhold Exchange Economy Configuration
+ */
+export const ECONOMY_CONFIG = {
+  // Configurable fixed exchange rate: 1 DKC = ₹1.00 INR
+  INR_PER_DKC: 1.0,
+
+  // Platform fee in basis points (100 bps = 1%, default 0)
+  PLATFORM_FEE_BPS: 0,
+
+  // Withdrawal limits (in DKC)
+  MIN_WITHDRAWAL_DKC: 10,
+  MAX_WITHDRAWAL_DKC: 100000,
+
+  // Deposit limits (in DKC)
+  MIN_DEPOSIT_DKC: 10,
+  MAX_DEPOSIT_DKC: 100000,
+};
+
+// UPI ID / VPA validation regex (e.g. name@okaxis, trader@okhdfc, user@ybl, fail@upi)
+export const UPI_ID_REGEX = /^[\w.-]+@[\w.-]+$/;
+
+export function isValidUpiId(upiId: unknown): boolean {
+  if (typeof upiId !== 'string') return false;
+  return UPI_ID_REGEX.test(upiId.trim());
+}

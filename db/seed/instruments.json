@@ -14,8 +14,8 @@
   {
     "id": "inst_fest_vip",
     "symbol": "FEST-VIP",
-    "name": "VIP Sanctum Access Pass",
-    "faceValue": 350000,
+    "name": "VIP All-Access Backstage Pass",
+    "faceValue": 500000,
     "collarBps": 1000,
     "tickSize": 100,
     "minQty": 1,

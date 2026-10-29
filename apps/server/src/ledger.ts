@@ -7,7 +7,14 @@
 
 import { assertInteger, assertNonNegative } from '@darkhold/shared';
 
-export type AccountKind = 'USER_AVAILABLE' | 'USER_RESERVED' | 'ESCROW' | 'ISSUER';
+export type AccountKind =
+  | 'USER_AVAILABLE'
+  | 'USER_RESERVED'
+  | 'ESCROW'
+  | 'ISSUER'
+  | 'TREASURY'
+  | 'PLATFORM_FEE'
+  | 'PENDING_WITHDRAWAL';
 
 export type JournalKind =
   | 'GRANT'
@@ -17,7 +24,14 @@ export type JournalKind =
   | 'ESCROW_LOCK'
   | 'ESCROW_RELEASE'
   | 'ESCROW_REFUND'
-  | 'AUCTION_PURCHASE';
+  | 'AUCTION_PURCHASE'
+  | 'DEPOSIT'
+  | 'TRADE'
+  | 'TRANSFER'
+  | 'FEE'
+  | 'WITHDRAWAL_HOLD'
+  | 'WITHDRAWAL_COMPLETE'
+  | 'WITHDRAWAL_REFUND';
 
 export type JournalDelta = {
   id: string;
@@ -57,8 +71,12 @@ export class LedgerManager {
     const key = `${kind}:${userId}:${symbol}`;
     let acc = this.accountCache.get(key);
     if (!acc) {
-      if (kind === 'ISSUER') {
+      if (kind === 'ISSUER' || kind === 'TREASURY') {
         acc = symbol ? `acc_issuer_${symbol}` : 'acc_issuer_cash';
+      } else if (kind === 'PLATFORM_FEE') {
+        acc = 'acc_platform_fee';
+      } else if (kind === 'PENDING_WITHDRAWAL') {
+        acc = userId ? `acc_${userId}_cash_pending_withdrawal` : 'acc_pending_withdrawals';
       } else {
         const target = symbol ? symbol : 'cash';
         const suffix = kind === 'USER_AVAILABLE' ? 'avail' : kind === 'USER_RESERVED' ? 'res' : 'esc';
@@ -460,6 +478,183 @@ export class LedgerManager {
       sellerBalanceDelta: { userId: sellerId, availableDelta: cashTotal, reservedDelta: 0, escrowDelta: 0 },
       buyerHoldingDelta: { userId: buyerId, symbol, availableDelta: qty, reservedDelta: 0, escrowDelta: 0 },
       sellerHoldingDelta: { userId: sellerId, symbol, availableDelta: 0, reservedDelta: -qty, escrowDelta: 0 },
+    };
+  }
+
+  /**
+   * P2P / Merch Transfer: Buyer available cash -> Seller available cash (minus optional fee).
+   */
+  public settleTransfer(
+    buyerId: string,
+    sellerId: string,
+    amount: number,
+    fee: number,
+    refId: string,
+    seq: number
+  ): {
+    journal: JournalDelta;
+    buyerBalanceDelta: BalanceDelta;
+    sellerBalanceDelta: BalanceDelta;
+  } {
+    const netSeller = amount - fee;
+    const jId = `j_xfer_${seq}_${this.journalCounter++}`;
+
+    const postings: PostingDelta[] = [
+      { accountId: this.getAccount('USER_AVAILABLE', buyerId), unit: 'CASH', amount: -amount, seq },
+      { accountId: this.getAccount('USER_AVAILABLE', sellerId), unit: 'CASH', amount: netSeller, seq },
+    ];
+
+    if (fee > 0) {
+      postings.push({
+        accountId: this.getAccount('PLATFORM_FEE'),
+        unit: 'CASH',
+        amount: fee,
+        seq,
+      });
+    }
+
+    const journal: JournalDelta = {
+      id: jId,
+      kind: 'TRANSFER',
+      refType: 'MERCH_PURCHASE',
+      refId,
+      postings,
+    };
+
+    this.assertJournalBalanced(journal);
+
+    return {
+      journal,
+      buyerBalanceDelta: { userId: buyerId, availableDelta: -amount, reservedDelta: 0, escrowDelta: 0 },
+      sellerBalanceDelta: { userId: sellerId, availableDelta: netSeller, reservedDelta: 0, escrowDelta: 0 },
+    };
+  }
+
+  /**
+   * Withdrawal Hold: User available cash -> User pending withdrawal hold.
+   */
+  public settleWithdrawalHold(
+    userId: string,
+    amount: number,
+    withdrawalId: string,
+    seq: number
+  ): {
+    journal: JournalDelta;
+    balanceDelta: BalanceDelta;
+  } {
+    const jId = `j_wth_hold_${seq}_${this.journalCounter++}`;
+
+    const journal: JournalDelta = {
+      id: jId,
+      kind: 'WITHDRAWAL_HOLD',
+      refType: 'WITHDRAWAL',
+      refId: withdrawalId,
+      postings: [
+        { accountId: this.getAccount('USER_AVAILABLE', userId), unit: 'CASH', amount: -amount, seq },
+        { accountId: this.getAccount('PENDING_WITHDRAWAL', userId), unit: 'CASH', amount, seq },
+      ],
+    };
+
+    this.assertJournalBalanced(journal);
+
+    return {
+      journal,
+      balanceDelta: { userId, availableDelta: -amount, reservedDelta: 0, escrowDelta: 0 },
+    };
+  }
+
+  /**
+   * Withdrawal Complete: User pending withdrawal hold -> Treasury.
+   */
+  public settleWithdrawalComplete(
+    userId: string,
+    amount: number,
+    withdrawalId: string,
+    seq: number
+  ): {
+    journal: JournalDelta;
+  } {
+    const jId = `j_wth_done_${seq}_${this.journalCounter++}`;
+
+    const journal: JournalDelta = {
+      id: jId,
+      kind: 'WITHDRAWAL_COMPLETE',
+      refType: 'WITHDRAWAL',
+      refId: withdrawalId,
+      postings: [
+        { accountId: this.getAccount('PENDING_WITHDRAWAL', userId), unit: 'CASH', amount: -amount, seq },
+        { accountId: this.getAccount('TREASURY'), unit: 'CASH', amount, seq },
+      ],
+    };
+
+    this.assertJournalBalanced(journal);
+
+    return { journal };
+  }
+
+  /**
+   * Withdrawal Refund: User pending withdrawal hold -> User available cash.
+   */
+  public settleWithdrawalRefund(
+    userId: string,
+    amount: number,
+    withdrawalId: string,
+    seq: number
+  ): {
+    journal: JournalDelta;
+    balanceDelta: BalanceDelta;
+  } {
+    const jId = `j_wth_ref_${seq}_${this.journalCounter++}`;
+
+    const journal: JournalDelta = {
+      id: jId,
+      kind: 'WITHDRAWAL_REFUND',
+      refType: 'WITHDRAWAL',
+      refId: withdrawalId,
+      postings: [
+        { accountId: this.getAccount('PENDING_WITHDRAWAL', userId), unit: 'CASH', amount: -amount, seq },
+        { accountId: this.getAccount('USER_AVAILABLE', userId), unit: 'CASH', amount, seq },
+      ],
+    };
+
+    this.assertJournalBalanced(journal);
+
+    return {
+      journal,
+      balanceDelta: { userId, availableDelta: amount, reservedDelta: 0, escrowDelta: 0 },
+    };
+  }
+
+  /**
+   * Deposit: Treasury -> User available cash.
+   */
+  public settleDeposit(
+    userId: string,
+    amount: number,
+    depositRef: string,
+    seq: number
+  ): {
+    journal: JournalDelta;
+    balanceDelta: BalanceDelta;
+  } {
+    const jId = `j_dep_${seq}_${this.journalCounter++}`;
+
+    const journal: JournalDelta = {
+      id: jId,
+      kind: 'DEPOSIT',
+      refType: 'BANK_SETTLEMENT_DEPOSIT',
+      refId: depositRef,
+      postings: [
+        { accountId: this.getAccount('TREASURY'), unit: 'CASH', amount: -amount, seq },
+        { accountId: this.getAccount('USER_AVAILABLE', userId), unit: 'CASH', amount, seq },
+      ],
+    };
+
+    this.assertJournalBalanced(journal);
+
+    return {
+      journal,
+      balanceDelta: { userId, availableDelta: amount, reservedDelta: 0, escrowDelta: 0 },
     };
   }
 }

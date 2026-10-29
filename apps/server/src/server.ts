@@ -16,6 +16,7 @@ import { bootstrapCore } from './recovery.js';
 import { AuthManager } from './auth.js';
 import { AntiBotManager } from './antibot.js';
 import { SolvencyCoordinator } from './solvency.js';
+import { StoreService } from './store.js';
 import { WebSocketGateway } from './websocket.js';
 import { registerRoutes } from './routes.js';
 
@@ -26,7 +27,7 @@ export async function buildServer(customPool?: pg.Pool) {
 
   const server = Fastify({
     logger: isBench ? false : config.NODE_ENV !== 'test',
-    bodyLimit: 1048576, // 1MB strict limit
+    bodyLimit: 15 * 1024 * 1024, // 15MB limit for large payloads / base64 image uploads
   });
 
   await server.register(cookie, {
@@ -58,10 +59,11 @@ export async function buildServer(customPool?: pg.Pool) {
   const auth = new AuthManager(pool);
   const antibot = new AntiBotManager(pool, config.POW_SECRET);
   const solvency = new SolvencyCoordinator(pool);
+  const store = new StoreService(pool);
   const wsGateway = new WebSocketGateway(auth, core);
 
   wsGateway.register(server);
-  registerRoutes(server, core, auth, antibot, solvency);
+  registerRoutes(server, core, auth, antibot, solvency, store);
 
   // Escrow sweeper interval
   const sweepInterval = setInterval(() => {

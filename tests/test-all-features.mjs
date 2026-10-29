@@ -91,7 +91,7 @@ async function main() {
       side: 'SELL',
       type: 'LIMIT',
       tif: 'GTC',
-      price: 150000,
+      price: 160000,
       qty: 1,
       pow: { challengeId: chal.data.challengeId, nonce }
     })

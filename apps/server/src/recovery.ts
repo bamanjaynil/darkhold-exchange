@@ -31,6 +31,9 @@ export async function bootstrapCore(
   let core: ExchangeCore;
 
   try {
+    // Ensure image_url column exists
+    await client.query('ALTER TABLE instruments ADD COLUMN IF NOT EXISTS image_url TEXT;').catch(() => {});
+
     // 2. Load Instruments
     const { rows: instRows } = await client.query<{
       id: string;
@@ -43,9 +46,10 @@ export async function bootstrapCore(
       max_qty_per_order: number;
       escrow_required: boolean;
       is_benchmark: boolean;
+      image_url?: string;
     }>('SELECT * FROM instruments WHERE active = TRUE');
 
-    const instruments: InstrumentConfig[] = instRows.map((r) => ({
+    const instruments: InstrumentConfig[] = instRows.map((r: any) => ({
       id: r.id,
       symbol: r.symbol,
       name: r.name,
@@ -56,6 +60,7 @@ export async function bootstrapCore(
       maxQtyPerOrder: r.max_qty_per_order,
       escrowRequired: r.escrow_required,
       isBenchmark: r.is_benchmark,
+      imageUrl: r.image_url || undefined,
     }));
 
     const persistence = new PersistenceEngine(pool, batchMax, batchMs);
@@ -119,29 +124,31 @@ export async function selfHealLedger(client: pg.PoolClient): Promise<void> {
     GROUP BY la.owner_user_id, la.kind
   `);
 
-  const userCashMap = new Map<string, { available: number; reserved: number; escrow: number }>();
+  const userCashMap = new Map<string, { available: number; reserved: number; escrow: number; pendingWithdrawals: number }>();
   for (const r of cashPostings) {
     let b = userCashMap.get(r.user_id);
     if (!b) {
-      b = { available: 0, reserved: 0, escrow: 0 };
+      b = { available: 0, reserved: 0, escrow: 0, pendingWithdrawals: 0 };
       userCashMap.set(r.user_id, b);
     }
     const amt = Number(r.total);
     if (r.kind === 'USER_AVAILABLE') b.available = amt;
     else if (r.kind === 'USER_RESERVED') b.reserved = amt;
     else if (r.kind === 'ESCROW') b.escrow = amt;
+    else if (r.kind === 'PENDING_WITHDRAWAL') b.pendingWithdrawals = amt;
   }
 
   for (const [userId, bal] of userCashMap.entries()) {
     await client.query(`
-      INSERT INTO balances (user_id, available, reserved, escrow, updated_at)
-      VALUES ($1, $2, $3, $4, NOW())
+      INSERT INTO balances (user_id, available, reserved, escrow, pending_withdrawals, updated_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
       ON CONFLICT (user_id) DO UPDATE SET
         available = EXCLUDED.available,
         reserved = EXCLUDED.reserved,
         escrow = EXCLUDED.escrow,
+        pending_withdrawals = EXCLUDED.pending_withdrawals,
         updated_at = NOW()
-    `, [userId, bal.available, bal.reserved, bal.escrow]);
+    `, [userId, bal.available, bal.reserved, bal.escrow, bal.pendingWithdrawals || 0]);
   }
 
   // 3. Re-materialize holdings from SUM(postings) for all user instrument holdings
@@ -211,13 +218,15 @@ export async function hydrateFromDb(core: ExchangeCore, client: pg.PoolClient): 
     available: string;
     reserved: string;
     escrow: string;
-  }>('SELECT user_id, available, reserved, escrow FROM balances');
+    pending_withdrawals: string;
+  }>('SELECT user_id, available, reserved, escrow, COALESCE(pending_withdrawals, 0) AS pending_withdrawals FROM balances');
 
   for (const b of balRows) {
     core.balances.set(b.user_id, {
       available: Number(b.available),
       reserved: Number(b.reserved),
       escrow: Number(b.escrow),
+      pendingWithdrawals: Number(b.pending_withdrawals || 0),
     });
   }
 

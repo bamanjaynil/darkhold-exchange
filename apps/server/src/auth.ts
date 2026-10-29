@@ -13,7 +13,7 @@ import { ExchangeCore } from './core.js';
 export type SessionUser = {
   id: string;
   username: string;
-  role: 'user' | 'admin';
+  role: 'user' | 'admin' | 'club';
   isDemo: boolean;
 };
 

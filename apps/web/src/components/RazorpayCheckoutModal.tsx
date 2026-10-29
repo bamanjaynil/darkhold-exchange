@@ -7,7 +7,7 @@ interface RazorpayCheckoutModalProps {
   user: { id: string; username: string } | null;
   csrfToken: string | null;
   currentAvailableMinor: number;
-  onSuccess: (newBalance: { available: number; reserved: number; escrow: number; total?: number }) => void;
+  onSuccess: (newBalance: { available: number; reserved: number; escrow: number; total?: number; pendingWithdrawals?: number }) => void;
 }
 
 type Step = 'DETAILS' | 'OTP' | 'RECEIPT';

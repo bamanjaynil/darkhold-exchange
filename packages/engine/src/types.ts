@@ -19,6 +19,7 @@ export type InstrumentConfig = {
   maxQtyPerOrder: number;  // e.g. 10
   escrowRequired: boolean;
   isBenchmark: boolean;
+  imageUrl?: string;
 };
 
 export type OrderNode = {

@@ -24,7 +24,7 @@ export async function performDemoReset(
 
     // 1. Truncate all mutable tables
     await client.query(
-      'TRUNCATE orders, trades, escrows, auctions, journals, postings, balances, holdings, solvency_snapshots CASCADE'
+      'TRUNCATE orders, trades, escrows, auctions, deposits, withdrawals, journals, postings, balances, holdings, solvency_snapshots, store_orders, store_order_items, issued_tickets CASCADE'
     );
 
     let seedSeq = 1;
@@ -34,10 +34,13 @@ export async function performDemoReset(
       'SELECT id, symbol FROM instruments WHERE active = TRUE'
     );
 
-    // 3. Ensure system ISSUER accounts exist
+    // 3. Ensure system ISSUER and TREASURY accounts exist
     await client.query(`
       INSERT INTO ledger_accounts (id, kind, owner_user_id, instrument_id)
-      VALUES ('acc_issuer_cash', 'ISSUER', NULL, NULL)
+      VALUES 
+        ('acc_issuer_cash', 'ISSUER', NULL, NULL),
+        ('acc_treasury_inr', 'TREASURY', NULL, NULL),
+        ('acc_platform_fee', 'PLATFORM_FEE', NULL, NULL)
       ON CONFLICT (id) DO NOTHING
     `);
 
@@ -119,6 +122,15 @@ export async function performDemoReset(
          VALUES ($1, $2, 0, 0, NOW())`,
         [uId, grantAmt]
       );
+
+      if (['usr_alice', 'usr_bob', 'usr_carol'].includes(uId)) {
+        await client.query(
+          `INSERT INTO deposits (id, user_id, amount_dkc, amount_inr, method, reference, status, journal_id, created_at)
+           VALUES ($1, $2, $3, $4, 'UPI', $5, 'COMPLETED', $6, NOW())
+           ON CONFLICT (reference) DO NOTHING`,
+          [`dep_reset_${uId}`, uId, grantAmt, (grantAmt / 100), `SEED_DEPOSIT_${uId.toUpperCase()}`, cashJournalId]
+        );
+      }
     }
 
     // Debit issuer account (exact negative sum)

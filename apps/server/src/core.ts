@@ -25,6 +25,7 @@ export type UserBalance = {
   available: number;
   reserved: number;
   escrow: number;
+  pendingWithdrawals?: number;
 };
 
 export type UserHolding = {
@@ -60,6 +61,7 @@ export type CoreEscrow = {
   amount: number;
   status: 'LOCKED' | 'RELEASED' | 'REFUNDED';
   expiresAt: number;
+  pickupOtp?: string;
 };
 
 export type Command =
@@ -234,6 +236,7 @@ export class ExchangeCore {
         available: bal.available,
         reserved: bal.reserved,
         escrow: bal.escrow,
+        pendingWithdrawals: bal.pendingWithdrawals || 0,
         total: bal.available + bal.reserved + bal.escrow,
       },
     }, seq);
@@ -301,7 +304,7 @@ export class ExchangeCore {
     if (userId === this.lastUserId && this.lastBalance) return this.lastBalance;
     let bal = this.balances.get(userId);
     if (!bal) {
-      bal = { available: 0, reserved: 0, escrow: 0 };
+      bal = { available: 0, reserved: 0, escrow: 0, pendingWithdrawals: 0 };
       this.balances.set(userId, bal);
     }
     this.lastUserId = userId;
@@ -340,10 +343,10 @@ export class ExchangeCore {
       }
     }
 
-    const totalCash = bal.available + bal.reserved + bal.escrow;
+    const totalCash = bal.available + bal.reserved + bal.escrow + (bal.pendingWithdrawals || 0);
     bal.reserved = computedReservedCash;
     bal.escrow = computedEscrowCash;
-    bal.available = Math.max(0, totalCash - bal.reserved - bal.escrow);
+    bal.available = Math.max(0, totalCash - bal.reserved - bal.escrow - (bal.pendingWithdrawals || 0));
     return bal;
   }
 
@@ -722,6 +725,7 @@ export class ExchangeCore {
             balanceDeltas.push(buyerBalanceDelta);
             holdingDeltas.push(sellerHoldingDelta);
 
+            const rawDigits = (Math.abs(currentSeq * 7919 + 849204) % 900000 + 100000).toString();
             const escrowObj: CoreEscrow = {
               id: escId,
               tradeId: trade.id,
@@ -732,6 +736,7 @@ export class ExchangeCore {
               amount: tradeAmount,
               status: 'LOCKED',
               expiresAt: this.clock.now() + 300_000, // 5 min timeout
+              pickupOtp: rawDigits,
             };
             this.escrows.set(escId, escrowObj);
             upsertEscrows.push(escrowObj);
