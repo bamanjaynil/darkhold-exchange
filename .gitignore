@@ -160,4 +160,8 @@ coverage/
 !.env.example
 
 *.log
+*.bin
 .DS_Store
+
+__pycache__/
+*.pyc

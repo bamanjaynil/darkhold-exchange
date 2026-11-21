@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-darkhold}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -19,6 +20,7 @@ services:
 
   redis:
     image: redis:7.4-alpine
+    restart: always
     command:
       - redis-server
       - --appendonly
