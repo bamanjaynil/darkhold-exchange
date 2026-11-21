@@ -124,10 +124,30 @@ describe('API Routes, Authentication & Failure-Path Integration Suite', () => {
       expect(meData.balance).toBeDefined();
     });
 
-    it('rejects /api/auth/me with 401 when unauthenticated', async () => {
+    it('returns 200 with null user when unauthenticated on /api/auth/me', async () => {
       const res = await server.inject({
         method: 'GET',
         url: '/api/auth/me',
+      });
+      expect(res.statusCode).toBe(200);
+      const data = JSON.parse(res.payload);
+      expect(data.user).toBeNull();
+      expect(data.authenticated).toBe(false);
+    });
+
+    it('allows unauthenticated GET /api/orders for public market viewing', async () => {
+      const res = await server.inject({
+        method: 'GET',
+        url: '/api/orders?symbol=FEST-GA',
+      });
+      expect(res.statusCode).toBe(200);
+      expect(Array.isArray(JSON.parse(res.payload))).toBe(true);
+    });
+
+    it('rejects /api/orders/my with 401 when unauthenticated', async () => {
+      const res = await server.inject({
+        method: 'GET',
+        url: '/api/orders/my',
       });
       expect(res.statusCode).toBe(401);
     });
@@ -150,13 +170,16 @@ describe('API Routes, Authentication & Failure-Path Integration Suite', () => {
       });
       expect(logoutRes.statusCode).toBe(200);
 
-      // 3. /api/auth/me is now 401
+      // 3. /api/auth/me is now unauthenticated
       const checkRes = await server.inject({
         method: 'GET',
         url: '/api/auth/me',
         cookies: { dk_session: sessionCookie.value },
       });
-      expect(checkRes.statusCode).toBe(401);
+      expect(checkRes.statusCode).toBe(200);
+      const checkData = JSON.parse(checkRes.payload);
+      expect(checkData.user).toBeNull();
+      expect(checkData.authenticated).toBe(false);
     });
   });
 

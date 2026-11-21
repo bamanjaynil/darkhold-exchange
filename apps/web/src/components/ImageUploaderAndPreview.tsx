@@ -77,8 +77,8 @@ export const ImageUploaderAndPreview: React.FC<ImageUploaderAndPreviewProps> = (
       const kb = Math.round(bytes / 1024);
       setFileSizeKb(kb);
 
-      // 2. Upload to server disk storage /api/uploads
-      const uploadRes = await fetch('/api/uploads', {
+      // 2. Also send upload to /api/uploads in background if available
+      void fetch('/api/uploads', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -92,13 +92,8 @@ export const ImageUploaderAndPreview: React.FC<ImageUploaderAndPreviewProps> = (
         }),
       }).catch(() => null);
 
-      if (uploadRes && uploadRes.ok) {
-        const uploadData = await uploadRes.json();
-        onChange(uploadData.url || dataUrl);
-      } else {
-        // Fallback: If network / upload server is offline, use optimized canvas data URL directly
-        onChange(dataUrl);
-      }
+      // Prefer self-contained Base64 Data URL directly for 100% zero-config reliability across Docker / WSL
+      onChange(dataUrl);
     } catch (err: any) {
       console.error(err);
       setError(err.message || 'Error optimizing image');

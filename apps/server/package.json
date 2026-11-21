@@ -14,7 +14,7 @@
     "test:db:setup": "tsx test/setup.ts",
     "test": "vitest run --fileParallelism=false",
     "sim:start": "tsx src/sim/simulator.ts --standalone",
-    "reset:demo": "tsx src/reset-demo.ts"
+    "reset:demo": "tsx src/reset.ts"
   },
   "dependencies": {
     "@darkhold/engine": "workspace:*",

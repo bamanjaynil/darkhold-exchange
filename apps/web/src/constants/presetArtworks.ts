@@ -151,6 +151,62 @@ const MYSTIC_RELIC_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4
   <text x="200" y="352" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#6EE7B7" text-anchor="middle" letter-spacing="1.5">LIMITED EDITION SACRED ARTIFACT</text>
 </svg>`;
 
+// 5. Ceramic Cyber Mug Artwork
+const CYBER_MUG_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <linearGradient id="mugBgW" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0E1726"/>
+      <stop offset="100%" stop-color="#050811"/>
+    </linearGradient>
+    <linearGradient id="mugCyanW" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00F0FF"/>
+      <stop offset="100%" stop-color="#0284C7"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" rx="16" fill="url(#mugBgW)"/>
+  <rect x="10" y="10" width="380" height="380" rx="12" fill="none" stroke="#00F0FF" stroke-width="1.5" opacity="0.3"/>
+  <path d="M160 85 Q150 65 160 45" fill="none" stroke="#00F0FF" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+  <path d="M190 75 Q200 55 190 35" fill="none" stroke="#00F0FF" stroke-width="2" stroke-linecap="round" opacity="0.8"/>
+  <path d="M220 85 Q210 65 220 45" fill="none" stroke="#00F0FF" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+  <path d="M260 140 C320 140 320 250 260 250" fill="none" stroke="#1E293B" stroke-width="22" stroke-linecap="round"/>
+  <path d="M260 140 C310 140 310 250 260 250" fill="none" stroke="#00F0FF" stroke-width="4" stroke-linecap="round"/>
+  <rect x="110" y="110" width="160" height="170" rx="16" fill="#111827" stroke="#1E293B" stroke-width="4"/>
+  <rect x="110" y="110" width="160" height="170" rx="16" fill="none" stroke="url(#mugCyanW)" stroke-width="2"/>
+  <circle cx="190" cy="195" r="32" fill="none" stroke="#00F0FF" stroke-width="2"/>
+  <polygon points="190,175 205,205 175,205" fill="#00F0FF" opacity="0.8"/>
+  <text x="190" y="240" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="800" fill="#00F0FF" text-anchor="middle" letter-spacing="2">DARKHOLD</text>
+  <text x="200" y="325" font-family="'JetBrains Mono', monospace" font-size="14" font-weight="900" fill="#F8FAFC" text-anchor="middle">CERAMIC CYBER MUG</text>
+  <text x="200" y="348" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#94A3B8" text-anchor="middle">11oz MATTE OBSIDIAN // HEAT-REACTIVE</text>
+</svg>`;
+
+// 6. Commemorative Holographic Poster Artwork
+const POSTER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <linearGradient id="posterBgW" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E0B36"/>
+      <stop offset="50%" stop-color="#0F051D"/>
+      <stop offset="100%" stop-color="#05010A"/>
+    </linearGradient>
+    <linearGradient id="rainbowSheenW" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00F0FF"/>
+      <stop offset="25%" stop-color="#A855F7"/>
+      <stop offset="50%" stop-color="#EC4899"/>
+      <stop offset="75%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#10B981"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" rx="16" fill="url(#posterBgW)"/>
+  <rect x="10" y="10" width="380" height="380" rx="12" fill="none" stroke="url(#rainbowSheenW)" stroke-width="2"/>
+  <rect x="75" y="45" width="250" height="310" rx="10" fill="#0D0717" stroke="#331A4D" stroke-width="3"/>
+  <polygon points="200,80 270,200 130,200" fill="none" stroke="url(#rainbowSheenW)" stroke-width="3"/>
+  <polygon points="200,105 250,195 150,195" fill="none" stroke="#00F0FF" stroke-width="1.5" opacity="0.7"/>
+  <circle cx="200" cy="165" r="18" fill="#EC4899" opacity="0.8"/>
+  <text x="200" y="240" font-family="'JetBrains Mono', monospace" font-size="16" font-weight="900" fill="url(#rainbowSheenW)" text-anchor="middle" letter-spacing="4">CULRAV 2026</text>
+  <text x="200" y="260" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#CBD5E1" text-anchor="middle" letter-spacing="2">COMMEMORATIVE FOIL POSTER</text>
+  <text x="200" y="285" font-family="'JetBrains Mono', monospace" font-size="9" font-weight="600" fill="#94A3B8" text-anchor="middle">A1 METALLIC EDITION • PRINT 42/250</text>
+  <text x="200" y="325" font-family="'JetBrains Mono', monospace" font-size="8" font-weight="700" fill="#A855F7" text-anchor="middle">MNNIT MEDIA CELL ARTWORK</text>
+</svg>`;
+
 export function svgToDataUri(svgString: string): string {
   return `data:image/svg+xml;utf8,${encodeURIComponent(svgString)}`;
 }
@@ -180,4 +236,26 @@ export const PRESET_OFFICIAL_ARTWORKS = [
     name: 'Eye of Agamotto Ancient Relic',
     dataUrl: svgToDataUri(MYSTIC_RELIC_SVG),
   },
+  {
+    id: 'mug',
+    label: '☕ Cyber Mug Artwork',
+    name: 'Festival Official Ceramic Cyber Mug',
+    dataUrl: svgToDataUri(CYBER_MUG_SVG),
+  },
+  {
+    id: 'poster',
+    label: '🖼️ Commemorative Poster Artwork',
+    name: 'A1 Commemorative Holographic Festival Poster',
+    dataUrl: svgToDataUri(POSTER_SVG),
+  },
 ];
+
+export const OFFICIAL_ARTWORKS: Record<string, string> = {
+  'FEST-GA': svgToDataUri(CONCERT_PASS_SVG),
+  'FEST-VIP': svgToDataUri(VIP_LANYARD_SVG),
+  'MERCH-CLOAK': svgToDataUri(HOODIE_SVG),
+  'RELIC-AGAMOTTO': svgToDataUri(MYSTIC_RELIC_SVG),
+  'prod_cloak': svgToDataUri(HOODIE_SVG),
+  'prod_mug': svgToDataUri(CYBER_MUG_SVG),
+  'prod_poster': svgToDataUri(POSTER_SVG),
+};

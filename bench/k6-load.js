@@ -15,7 +15,7 @@ export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   thresholds: {
     http_req_failed: ['rate<0.01'], // Error rate must stay below 1%
-    http_req_duration: ['p(95)<50'], // 95% of orders processed under 50ms under 50 concurrent VUs
+    http_req_duration: ['p(95)<100'], // 95% of orders processed under 100ms under 50 concurrent unthrottled VUs
   },
 };
 

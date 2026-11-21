@@ -24,6 +24,7 @@ export type JournalKind =
   | 'ESCROW_LOCK'
   | 'ESCROW_RELEASE'
   | 'ESCROW_REFUND'
+  | 'ESCROW_PENALTY_CANCEL'
   | 'AUCTION_PURCHASE'
   | 'DEPOSIT'
   | 'TRADE'
@@ -325,7 +326,7 @@ export class LedgerManager {
     buyerBalanceDelta: BalanceDelta;
     sellerHoldingDelta: HoldingDelta;
   } {
-    const jId = `j_esc_lock_${seq}_${this.journalCounter++}`;
+    const jId = `j_trade_esc_${seq}_${this.journalCounter++}`;
 
     const journal: JournalDelta = {
       id: jId,
@@ -431,6 +432,56 @@ export class LedgerManager {
     return {
       journal,
       buyerBalanceDelta: { userId: buyerId, availableDelta: amount, reservedDelta: 0, escrowDelta: -amount },
+      sellerHoldingDelta: { userId: sellerId, symbol, availableDelta: qty, reservedDelta: 0, escrowDelta: -qty },
+    };
+  }
+
+  /**
+   * Cancel Deal with 1% Penalty:
+   * Buyer escrow cash: -totalAmount
+   * Buyer available cash: +refundAmount (99%)
+   * Seller available cash: +compensationAmount (1%)
+   * Seller escrow units: -qty
+   * Seller available units: +qty
+   */
+  public cancelDealWithPenalty(
+    buyerId: string,
+    sellerId: string,
+    symbol: string,
+    totalAmount: number,
+    refundAmount: number,
+    compensationAmount: number,
+    qty: number,
+    dealId: string,
+    seq: number
+  ): {
+    journal: JournalDelta;
+    buyerBalanceDelta: BalanceDelta;
+    sellerBalanceDelta: BalanceDelta;
+    sellerHoldingDelta: HoldingDelta;
+  } {
+    const jId = `j_deal_cxl_${seq}_${this.journalCounter++}`;
+
+    const journal: JournalDelta = {
+      id: jId,
+      kind: 'ESCROW_PENALTY_CANCEL',
+      refType: 'DEAL',
+      refId: dealId,
+      postings: [
+        { accountId: this.getAccount('ESCROW', buyerId), unit: 'CASH', amount: -totalAmount, seq },
+        { accountId: this.getAccount('USER_AVAILABLE', buyerId), unit: 'CASH', amount: refundAmount, seq },
+        { accountId: this.getAccount('USER_AVAILABLE', sellerId), unit: 'CASH', amount: compensationAmount, seq },
+        { accountId: this.getAccount('ESCROW', sellerId, symbol), unit: symbol, amount: -qty, seq },
+        { accountId: this.getAccount('USER_AVAILABLE', sellerId, symbol), unit: symbol, amount: qty, seq },
+      ],
+    };
+
+    this.assertJournalBalanced(journal);
+
+    return {
+      journal,
+      buyerBalanceDelta: { userId: buyerId, availableDelta: refundAmount, reservedDelta: 0, escrowDelta: -totalAmount },
+      sellerBalanceDelta: { userId: sellerId, availableDelta: compensationAmount, reservedDelta: 0, escrowDelta: 0 },
       sellerHoldingDelta: { userId: sellerId, symbol, availableDelta: qty, reservedDelta: 0, escrowDelta: -qty },
     };
   }

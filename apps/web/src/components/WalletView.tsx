@@ -462,7 +462,7 @@ export const WalletView: React.FC<WalletViewProps> = ({
 
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             {/* Filter Pills */}
-            {['ALL', 'DEPOSIT', 'WITHDRAWAL', 'TRANSFER'].map((f) => (
+            {['ALL', 'DEPOSIT', 'WITHDRAWAL', 'TRANSFER', 'TRADE'].map((f) => (
               <button
                 key={f}
                 type="button"
@@ -541,12 +541,16 @@ export const WalletView: React.FC<WalletViewProps> = ({
                                 ? 'rgba(0, 240, 255, 0.15)'
                                 : item.type === 'WITHDRAWAL'
                                 ? 'rgba(245, 158, 11, 0.15)'
+                                : item.type === 'TRADE'
+                                ? 'rgba(16, 185, 129, 0.15)'
                                 : 'rgba(168, 85, 247, 0.15)',
                             color:
                               item.type === 'DEPOSIT'
                                 ? '#00F0FF'
                                 : item.type === 'WITHDRAWAL'
                                 ? '#F59E0B'
+                                : item.type === 'TRADE'
+                                ? '#10B981'
                                 : '#A855F7',
                           }}
                         >

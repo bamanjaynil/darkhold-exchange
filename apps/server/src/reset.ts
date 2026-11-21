@@ -9,6 +9,7 @@ import pg from 'pg';
 import { ExchangeCore } from './core.js';
 import { hydrateFromDb } from './recovery.js';
 import { SolvencyCoordinator } from './solvency.js';
+import { OFFICIAL_ARTWORKS } from './artworks.js';
 
 export async function performDemoReset(
   core: ExchangeCore,
@@ -24,7 +25,7 @@ export async function performDemoReset(
 
     // 1. Truncate all mutable tables
     await client.query(
-      'TRUNCATE orders, trades, escrows, auctions, deposits, withdrawals, journals, postings, balances, holdings, solvency_snapshots, store_orders, store_order_items, issued_tickets CASCADE'
+      'TRUNCATE orders, trades, deals, escrows, auctions, deposits, withdrawals, journals, postings, balances, holdings, solvency_snapshots, store_orders, store_order_items, issued_tickets CASCADE'
     );
 
     let seedSeq = 1;
@@ -328,6 +329,124 @@ export async function performDemoReset(
       );
     }
 
+    // 9. Update Instruments with Official Visual Artworks
+    await client.query('ALTER TABLE instruments ADD COLUMN IF NOT EXISTS image_url TEXT;').catch(() => {});
+    await client.query(
+      `UPDATE instruments SET image_url = CASE
+        WHEN symbol = 'FEST-GA' THEN $1
+        WHEN symbol = 'FEST-VIP' THEN $2
+        WHEN symbol = 'MERCH-CLOAK' THEN $3
+        WHEN symbol = 'RELIC-AGAMOTTO' THEN $4
+        ELSE image_url
+      END`,
+      [
+        OFFICIAL_ARTWORKS.festGa,
+        OFFICIAL_ARTWORKS.festVip,
+        OFFICIAL_ARTWORKS.merchCloak,
+        OFFICIAL_ARTWORKS.relicAgamotto,
+      ]
+    );
+
+    // 10. Seed Official Fest Organizing Council & Campus Products
+    await client.query(`
+      INSERT INTO organizations (id, name, slug, org_type, description, affiliation, contact_email, public_contact, status, is_verified, created_by, approved_by)
+      VALUES ('org_fest_council', 'Fest Organizing Council', 'fest-council', 'festival', 'Official Student Fest Core Team and Council', 'MNNIT Allahabad / Student Activity Centre', 'fest@mnnit.ac.in', 'SAC Ground Floor', 'APPROVED', TRUE, 'usr_admin', 'usr_admin')
+      ON CONFLICT (id) DO UPDATE SET is_verified = TRUE, status = 'APPROVED';
+    `);
+
+    await client.query(
+      `INSERT INTO products (id, organization_id, name, description, category, images, base_price_dkc, base_price_inr, comparison_price_dkc, status, fulfillment_type, pickup_location, pickup_instructions, max_per_customer)
+      VALUES
+        ('prod_cloak', 'org_fest_council', 'Darkhold Official Fest Stealth Cloak / Hoodie', 'Heavyweight 240 GSM organic cotton-poly blend fleece with oversized cyberpunk drop-shoulder cut, dual tactical zipper pockets, and cryptographic heat-press crest.', 'APPAREL', $1::jsonb, 80000, 800.00, 120000, 'PUBLISHED', 'PICKUP', 'Student Activity Centre (SAC) Counter 2', 'Show OTP/pickup token on order detail screen at collection counter.', 3),
+        ('prod_mug', 'org_fest_council', 'Festival Official Ceramic Cyber Mug', '11oz Matte-finish ceramic mug with reactive neon thermal festival emblem.', 'ACCESSORY', $2::jsonb, 35000, 350.00, 45000, 'PUBLISHED', 'PICKUP', 'SAC Counter 2', 'Collect between 10:00 AM - 6:00 PM during festival week.', 5),
+        ('prod_poster', 'org_fest_council', 'A1 Commemorative Holographic Festival Poster', 'Limited print 300 GSM metallic foil commemorative festival poster designed by MNNIT Media Cell.', 'PRINT', $3::jsonb, 20000, 200.00, 30000, 'PUBLISHED', 'PICKUP', 'SAC Counter 2', 'Comes packaged in protective cylindrical kraft tube.', 5)
+      ON CONFLICT (id) DO UPDATE SET
+        images = EXCLUDED.images,
+        base_price_dkc = EXCLUDED.base_price_dkc,
+        status = 'PUBLISHED'`,
+      [
+        JSON.stringify([OFFICIAL_ARTWORKS.hoodie]),
+        JSON.stringify([OFFICIAL_ARTWORKS.cyberMug]),
+        JSON.stringify([OFFICIAL_ARTWORKS.poster]),
+      ]
+    );
+
+    // Product Variants with initial stock
+    await client.query(`
+      INSERT INTO product_variants (id, product_id, title, sku, attributes, price_adjustment_dkc, stock, reserved_stock, is_available)
+      VALUES
+        ('var_cloak_s', 'prod_cloak', 'Size S', 'CLK-S', '{"size": "S"}'::jsonb, 0, 50, 0, TRUE),
+        ('var_cloak_m', 'prod_cloak', 'Size M', 'CLK-M', '{"size": "M"}'::jsonb, 0, 80, 0, TRUE),
+        ('var_cloak_l', 'prod_cloak', 'Size L', 'CLK-L', '{"size": "L"}'::jsonb, 0, 100, 0, TRUE),
+        ('var_cloak_xl', 'prod_cloak', 'Size XL', 'CLK-XL', '{"size": "XL"}'::jsonb, 0, 40, 0, TRUE),
+        ('var_mug_black', 'prod_mug', 'Matte Obsidian Black', 'MUG-BLK', '{"color": "Matte Obsidian Black"}'::jsonb, 0, 75, 0, TRUE),
+        ('var_mug_cyan', 'prod_mug', 'Neon Cyber Cyan', 'MUG-CYN', '{"color": "Neon Cyber Cyan"}'::jsonb, 0, 60, 0, TRUE),
+        ('var_poster_std', 'prod_poster', 'Standard Metallic Foil Edition', 'POST-FOIL', '{"edition": "Standard Foil"}'::jsonb, 0, 150, 0, TRUE)
+      ON CONFLICT (id) DO UPDATE SET
+        stock = EXCLUDED.stock,
+        is_available = TRUE;
+    `);
+
+    // Drops & Drops Items
+    await client.query(
+      `INSERT INTO drops (id, organization_id, title, description, cover_url, status, starts_at, ends_at, pickup_location, pickup_window, customer_instructions)
+      VALUES
+        ('drop_spring_2026', 'org_fest_council', 'Official Fest Spring 2026 Primary Merch Drop', 'Official festival merchandise collection released directly by the Fest Organizing Committee.', $1, 'LIVE', NOW() - INTERVAL '1 day', NOW() + INTERVAL '14 days', 'Student Activity Centre (SAC) Counter 2', '10:00 AM - 6:00 PM Daily', 'Bring your student ID card along with order QR / pickup code.')
+      ON CONFLICT (id) DO UPDATE SET cover_url = EXCLUDED.cover_url, status = 'LIVE'`,
+      [OFFICIAL_ARTWORKS.festivalBanner]
+    );
+
+    await client.query(`
+      INSERT INTO drop_items (id, drop_id, product_id, allocated_stock, sold_count, sort_order)
+      VALUES
+        ('ditem_cloak', 'drop_spring_2026', 'prod_cloak', 290, 14, 1),
+        ('ditem_mug', 'drop_spring_2026', 'prod_mug', 135, 8, 2),
+        ('ditem_poster', 'drop_spring_2026', 'prod_poster', 150, 12, 3)
+      ON CONFLICT (id) DO NOTHING;
+    `);
+
+    // Events & Ticket Tiers
+    await client.query(
+      `INSERT INTO events (id, organization_id, title, description, venue, cover_url, starts_at, ends_at, sales_open_at, sales_close_at, total_capacity, status, checkin_instructions)
+      VALUES
+        ('evt_pronite_2026', 'org_fest_council', 'Culrav-Avishkar Annual Pronite Festival 2026', 'Three days of live headline performances, EDM night, fusion concerts, and laser pyrotechnics.', 'Gymkhana Main Arena, MNNIT Campus', $1, NOW() + INTERVAL '10 days', NOW() + INTERVAL '13 days', NOW() - INTERVAL '3 days', NOW() + INTERVAL '9 days', 5000, 'PUBLISHED', 'Scan your ticket QR at Gate 1 (General) or Gate 3 (VIP Pit). Physical wristbands provided at turnstiles.')
+      ON CONFLICT (id) DO UPDATE SET cover_url = EXCLUDED.cover_url, status = 'PUBLISHED'`,
+      [OFFICIAL_ARTWORKS.festivalBanner]
+    );
+
+    await client.query(`
+      INSERT INTO ticket_tiers (id, event_id, name, description, price_dkc, price_inr, capacity, sold_count, is_vip, benefits, max_per_customer, status)
+      VALUES
+        ('tier_pronite_ga', 'evt_pronite_2026', 'Pronite General Admission Pass', 'Full 3-day arena standing access to all headline pronite artist performances.', 150000, 1500.00, 4500, 120, FALSE, '["3-Day Standing Arena Access", "Main Stage Pyrotechnics View", "Collar-Capped Verified Resale"]'::jsonb, 4, 'ACTIVE'),
+        ('tier_pronite_vip', 'evt_pronite_2026', 'VIP All-Access Backstage Pass', 'Front-row barricade pit access, backstage green-room artist meet & greet, and fast-track express entry.', 500000, 5000.00, 500, 35, TRUE, '["Front-Row Barricade Pit Access", "Backstage Green-Room Meet & Greet", "Fast-Track Turnstile Lane", "Exclusive Fest Lanyard & Badge"]'::jsonb, 2, 'ACTIVE')
+      ON CONFLICT (id) DO UPDATE SET status = 'ACTIVE';
+    `);
+
+    // 11. Seed Active Community Marketplace Listings with Real SVG Artworks
+    await client.query(`
+      ALTER TABLE community_listings ADD COLUMN IF NOT EXISTS buyer_user_id VARCHAR(64);
+      ALTER TABLE community_listings ADD COLUMN IF NOT EXISTS pickup_otp VARCHAR(32);
+      ALTER TABLE community_listings ADD COLUMN IF NOT EXISTS sold_at TIMESTAMPTZ;
+    `).catch(() => {});
+
+    await client.query(
+      `INSERT INTO community_listings (
+        id, user_id, title, description, category, condition, images, price_dkc, listing_type, trade_terms, contact_method, status
+      ) VALUES
+        ('comm_calc_alice', 'usr_alice', 'TI-84 Plus CE Color Graphing Calculator', 'Pre-owned graphing calculator in pristine condition. Includes charging cable and slide case. Essential for engineering math and physics.', 'ELECTRONICS', 'EXCELLENT', $1::jsonb, 350000, 'SALE', 'Hostel 4 or SAC Desk', 'Hostel 4, Room 214 or reach @alice in-app', 'ACTIVE'),
+        ('comm_clrs_bob', 'usr_bob', 'Introduction to Algorithms (CLRS 4th Edition)', 'Hardcover edition with clean pages and no markings. Essential textbook for competitive programming and data structures.', 'BOOKS', 'LIKE_NEW', $2::jsonb, 120000, 'BOTH', 'Library 2nd Floor Study Desk', 'Library 2nd Floor study desk or @bob in-app', 'ACTIVE'),
+        ('comm_lamp_carol', 'usr_carol', 'Ergonomic Cyberpunk LED Study Lamp', 'Multi-pivot dimmable desk lamp with warm and cool modes plus integrated wireless phone charging pad.', 'ELECTRONICS', 'LIKE_NEW', $3::jsonb, 80000, 'SALE', 'Hostel 5 Common Room', 'Hostel 5 Common Room or reach @carol in-app', 'ACTIVE')
+      ON CONFLICT (id) DO UPDATE SET
+        images = EXCLUDED.images,
+        price_dkc = EXCLUDED.price_dkc,
+        status = 'ACTIVE'`,
+      [
+        JSON.stringify([OFFICIAL_ARTWORKS.calculator]),
+        JSON.stringify([OFFICIAL_ARTWORKS.clrsBook]),
+        JSON.stringify([OFFICIAL_ARTWORKS.dormLamp]),
+      ]
+    );
+
     await client.query('COMMIT');
 
     // 9. Rebuild Matching Engine & In-Memory ExchangeCore RAM state
@@ -335,6 +454,13 @@ export async function performDemoReset(
       core.engine.registerInstrument(inst);
     }
     await hydrateFromDb(core, client);
+
+    for (const inst of core.instruments.values()) {
+      if (inst.symbol === 'FEST-GA') (inst as any).imageUrl = OFFICIAL_ARTWORKS.festGa;
+      if (inst.symbol === 'FEST-VIP') (inst as any).imageUrl = OFFICIAL_ARTWORKS.festVip;
+      if (inst.symbol === 'MERCH-CLOAK') (inst as any).imageUrl = OFFICIAL_ARTWORKS.merchCloak;
+      if (inst.symbol === 'RELIC-AGAMOTTO') (inst as any).imageUrl = OFFICIAL_ARTWORKS.relicAgamotto;
+    }
 
     core.cachedL2Snapshots.clear();
     core.cachedTrades.clear();

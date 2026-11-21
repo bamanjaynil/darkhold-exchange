@@ -33,6 +33,7 @@ export class OrderBook {
   // Lookups
   private levels: Map<number, PriceLevel> = new Map();
   private ordersById: Map<string, OrderNode> = new Map();
+  private ordersByUserId: Map<string, Map<string, OrderNode>> = new Map();
   private clientOrderHistory: Map<string, EngineResult> = new Map();
   private lastLevelPrice: number = -1;
   private lastLevel?: PriceLevel;
@@ -56,6 +57,15 @@ export class OrderBook {
 
   public getOpenOrders(): OrderNode[] {
     return Array.from(this.ordersById.values());
+  }
+
+  public getOpenOrdersForUser(userId: string, out: OrderNode[]): void {
+    const userMap = this.ordersByUserId.get(userId);
+    if (userMap) {
+      for (const ord of userMap.values()) {
+        out.push(ord);
+      }
+    }
   }
 
   public getOpenOrderCount(): number {
@@ -274,6 +284,13 @@ export class OrderBook {
           filledOrders.push({ ...resting });
           this.removeOrderFromLevel(resting, level);
           this.ordersById.delete(resting.id);
+          const uMap = this.ordersByUserId.get(resting.userId);
+          if (uMap) {
+            uMap.delete(resting.id);
+            if (uMap.size === 0) {
+              this.ordersByUserId.delete(resting.userId);
+            }
+          }
         } else {
           resting.status = 'PARTIALLY_FILLED';
           if (!filledOrders) filledOrders = [];
@@ -350,6 +367,13 @@ export class OrderBook {
     }
 
     this.ordersById.delete(orderId);
+    const uMap = this.ordersByUserId.get(node.userId);
+    if (uMap) {
+      uMap.delete(orderId);
+      if (uMap.size === 0) {
+        this.ordersByUserId.delete(node.userId);
+      }
+    }
     node.status = 'CANCELLED';
 
     return {
@@ -482,6 +506,12 @@ export class OrderBook {
     level.totalQty += node.remainingQty;
     level.orderCount += 1;
     this.ordersById.set(node.id, node);
+    let uMap = this.ordersByUserId.get(node.userId);
+    if (!uMap) {
+      uMap = new Map();
+      this.ordersByUserId.set(node.userId, uMap);
+    }
+    uMap.set(node.id, node);
   }
 
   private removeOrderFromLevel(node: OrderNode, level: PriceLevel): void {

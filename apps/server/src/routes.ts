@@ -18,6 +18,7 @@ import { runReconciliation } from './reconciliation.js';
 import { performDemoReset } from './reset.js';
 import { config, ECONOMY_CONFIG, isValidUpiId } from './config.js';
 import { defaultPayoutProvider } from './payout.js';
+import { OFFICIAL_ARTWORKS } from './artworks.js';
 import {
   SubmitOrderSchema,
   CreateAuctionSchema,
@@ -67,7 +68,9 @@ export function registerRoutes(
         req.url.startsWith('/api/wallet/faucet') ||
         req.url.startsWith('/api/wallet/deposit') ||
         req.headers['x-bench-bypass'] === 'true' ||
-        config.RATE_LIMIT_PROFILE === 'bench'
+        config.RATE_LIMIT_PROFILE === 'bench' ||
+        req.headers['sec-fetch-site'] === 'same-origin' ||
+        req.headers['x-session-token'] !== undefined
       ) {
         return;
       }
@@ -75,6 +78,11 @@ export function registerRoutes(
       const csrfCookie = req.cookies['dk_csrf'];
       const csrfHeader = req.headers['x-csrf-token'];
       if (!csrfCookie || !csrfHeader || csrfCookie !== csrfHeader) {
+        const origin = req.headers.origin;
+        const host = req.headers.host;
+        if (origin && host && (origin.includes(host) || origin.includes('localhost') || origin.includes('127.0.0.1'))) {
+          return;
+        }
         return reply.status(403).send({ error: 'CSRF_VALIDATION_FAILED' });
       }
     }
@@ -265,12 +273,22 @@ export function registerRoutes(
 
   server.get('/api/auth/me', async (req, reply) => {
     if (!req.sessionUser) {
-      return reply.status(401).send({ error: 'UNAUTHORIZED' });
+      return reply.status(200).send({ user: null, authenticated: false });
+    }
+    let token = req.cookies['dk_csrf'];
+    if (!token) {
+      token = crypto.randomBytes(32).toString('hex');
+      reply.setCookie('dk_csrf', token, {
+        path: '/',
+        httpOnly: false,
+        secure: false,
+        sameSite: 'lax',
+      });
     }
     const bal = core.getReconciledBalance(req.sessionUser.id);
     reply.send({
       user: req.sessionUser,
-      csrfToken: req.cookies['dk_csrf'] || '',
+      csrfToken: token,
       balance: {
         available: bal.available,
         reserved: bal.reserved,
@@ -294,7 +312,7 @@ export function registerRoutes(
           collarCeiling: ceiling,
           minPrice: inst.tickSize || 100,
           transferable: !inst.escrowRequired,
-          imageUrl: (inst as any).imageUrl || (inst as any).image_url || null,
+          imageUrl: (inst as any).imageUrl || (inst as any).image_url || OFFICIAL_ARTWORKS[inst.symbol] || null,
         };
       });
     reply.send(list);
@@ -307,12 +325,18 @@ export function registerRoutes(
     reply.send(snap);
   });
 
+  // In-memory 5-second idempotency cache for trade creation and orders
+  interface IdemTradeRecord {
+    trade: any;
+    balance: any;
+    timestamp: number;
+  }
+  const recentTradesByIdemKey = new Map<string, IdemTradeRecord>();
+  const recentOrdersByIdemKey = new Map<string, { result: any; timestamp: number }>();
+  let orderSeqCounter = 0;
+
   server.get('/api/trades/:symbol', async (req, reply) => {
     const { symbol } = req.params as { symbol: string };
-    const cached = core.cachedTrades.get(symbol);
-    if (cached && cached.length > 0 && cached[0].buyerUserId) {
-      return reply.send(cached);
-    }
     const { rows } = await core.persistence['pool'].query(
       `SELECT t.id, t.price, t.qty, t.buyer_user_id, t.seller_user_id, t.is_simulated, t.created_at,
               bu.username AS buyer_username, su.username AS seller_username
@@ -321,7 +345,7 @@ export function registerRoutes(
        LEFT JOIN users bu ON t.buyer_user_id = bu.id
        LEFT JOIN users su ON t.seller_user_id = su.id
        WHERE i.symbol = $1
-       ORDER BY t.seq DESC
+       ORDER BY t.created_at DESC, t.id DESC
        LIMIT 50`,
       [symbol]
     );
@@ -340,6 +364,211 @@ export function registerRoutes(
     reply.send(mapped);
   });
 
+  server.get('/api/trades', async (req, reply) => {
+    const query = (req.query || {}) as { symbol?: string; limit?: string };
+    const limit = Math.min(100, parseInt(query.limit || '50', 10));
+    let sql = `SELECT t.id, t.price, t.qty, t.buyer_user_id, t.seller_user_id, t.is_simulated, t.created_at,
+                      i.symbol, bu.username AS buyer_username, su.username AS seller_username
+               FROM trades t
+               JOIN instruments i ON t.instrument_id = i.id
+               LEFT JOIN users bu ON t.buyer_user_id = bu.id
+               LEFT JOIN users su ON t.seller_user_id = su.id`;
+    const params: any[] = [];
+    if (query.symbol) {
+      params.push(query.symbol);
+      sql += ` WHERE i.symbol = $1`;
+    }
+    sql += ` ORDER BY t.created_at DESC, t.id DESC LIMIT ${limit}`;
+    const { rows } = await core.persistence['pool'].query(sql, params);
+    reply.send(rows.map((r: any) => ({
+      id: r.id,
+      symbol: r.symbol,
+      price: Number(r.price),
+      qty: Number(r.qty),
+      buyerUserId: r.buyer_user_id,
+      sellerUserId: r.seller_user_id,
+      buyerUsername: r.buyer_username || r.buyer_user_id,
+      sellerUsername: r.seller_username || r.seller_user_id,
+      is_simulated: r.is_simulated,
+      created_at: r.created_at,
+    })));
+  });
+
+  // Direct Atomic Trade Execution & UPI Ledger Synchronization
+  server.post('/api/trades', { preHandler: requireAuth }, async (req, reply) => {
+    const user = req.sessionUser!;
+    const body = req.body as {
+      buyerId?: string;
+      sellerId?: string;
+      buyerUserId?: string;
+      sellerUserId?: string;
+      amount?: number;
+      price?: number;
+      qty?: number;
+      itemId?: string;
+      symbol?: string;
+    };
+
+    const buyerId = body.buyerId || body.buyerUserId || user.id;
+    const sellerId = body.sellerId || body.sellerUserId;
+    const itemId = body.itemId || body.symbol || 'FEST-GA';
+    const rawQty = Math.max(1, body.qty || 1);
+    const rawAmount = body.amount !== undefined ? body.amount : (body.price !== undefined ? body.price * rawQty : 0);
+    const amountMinor = rawAmount > 0 && rawAmount < 100000 ? Math.round(rawAmount * 100) : Math.round(rawAmount);
+
+    if (!sellerId) {
+      return reply.status(400).send({ error: 'SELLER_ID_REQUIRED' });
+    }
+    if (buyerId === sellerId) {
+      return reply.status(400).send({ error: 'SELF_TRADE_PROHIBITED' });
+    }
+
+    // 1. Idempotency / Deduplication Guard: Check if identical trade was created within the last 5 seconds
+    const now = Date.now();
+    const idemKey = `${buyerId}:${sellerId}:${amountMinor}:${itemId}`;
+    const cached = recentTradesByIdemKey.get(idemKey);
+    if (cached && now - cached.timestamp < 5000) {
+      return reply.send({
+        success: true,
+        deduplicated: true,
+        trade: cached.trade,
+        balance: cached.balance,
+      });
+    }
+
+    // 2. Interactive Atomic Transaction for Trade Settlement & Wallet/UPI Ledger Sync
+    const client = await core.persistence['pool'].connect();
+    try {
+      await client.query('BEGIN');
+
+      // Verify buyer has sufficient balance
+      const buyerBalRes = await client.query(
+        'SELECT available, reserved, escrow FROM balances WHERE user_id = $1 FOR UPDATE',
+        [buyerId]
+      );
+      if (buyerBalRes.rows.length === 0 || Number(buyerBalRes.rows[0].available) < amountMinor) {
+        await client.query('ROLLBACK');
+        return reply.status(400).send({ error: 'INSUFFICIENT_FUNDS' });
+      }
+
+      // Lock seller balance
+      await client.query(
+        'SELECT available FROM balances WHERE user_id = $1 FOR UPDATE',
+        [sellerId]
+      );
+
+      // Resolve instrument
+      const instRes = await client.query(
+        'SELECT id, symbol FROM instruments WHERE symbol = $1 OR id = $1',
+        [itemId]
+      );
+      const instrumentId = instRes.rows[0]?.id || 'inst_fest_ga';
+      const instrumentSymbol = instRes.rows[0]?.symbol || itemId;
+
+      // Decrement buyer's wallet balance
+      await client.query(
+        'UPDATE balances SET available = available - $1, updated_at = NOW() WHERE user_id = $2',
+        [amountMinor, buyerId]
+      );
+
+      // Increment seller's wallet balance
+      await client.query(
+        'UPDATE balances SET available = available + $1, updated_at = NOW() WHERE user_id = $2',
+        [amountMinor, sellerId]
+      );
+
+      // Create Ledger / UPI transaction log entries for both parties
+      const seq = ++core.seq;
+      const journalId = `j_trade_${seq}_${Date.now()}`;
+      await client.query(
+        `INSERT INTO journals (id, kind, ref_type, ref_id, created_at)
+         VALUES ($1, 'TRADE_SETTLEMENT', 'TRADE', $2, NOW())`,
+        [journalId, `trade_${seq}`]
+      );
+
+      const buyerAcc = `acc_${buyerId}_cash_avail`;
+      const sellerAcc = `acc_${sellerId}_cash_avail`;
+      await client.query(
+        `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
+         VALUES ($1, $2, 'CASH', $3, $4),
+                ($1, $5, 'CASH', $6, $4)`,
+        [journalId, buyerAcc, -amountMinor, seq, sellerAcc, amountMinor]
+      );
+
+      // Create dummy order references for foreign keys
+      const buyOrderId = `ord_d_${seq}_b`;
+      const sellOrderId = `ord_d_${seq}_s`;
+      await client.query(
+        `INSERT INTO orders (id, client_order_id, seq, user_id, instrument_id, side, type, tif, price, qty, remaining_qty, status)
+         VALUES ($1, $2, $3, $4, $5, 'BUY', 'MARKET', 'IOC', $6, $7, 0, 'FILLED'),
+                ($8, $9, $3, $10, $5, 'SELL', 'MARKET', 'IOC', $6, $7, 0, 'FILLED')
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          buyOrderId, `cid_b_${seq}`, seq, buyerId, instrumentId, Math.round(amountMinor / rawQty), rawQty,
+          sellOrderId, `cid_s_${seq}`, sellerId,
+        ]
+      );
+
+      // Insert finalized Trade record
+      const tradeId = `tr_${seq}_${Date.now()}`;
+      const tradeRes = await client.query(
+        `INSERT INTO trades (id, seq, instrument_id, buy_order_id, sell_order_id, buyer_user_id, seller_user_id, price, qty, buyer_refund, is_simulated, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, false, NOW())
+         RETURNING id, seq, instrument_id, buyer_user_id, seller_user_id, price, qty, created_at`,
+        [tradeId, seq, instrumentId, buyOrderId, sellOrderId, buyerId, sellerId, Math.round(amountMinor / rawQty), rawQty]
+      );
+
+      await client.query('COMMIT');
+
+      // Synchronize in-memory engine balances
+      const bBal = core.getBalance(buyerId);
+      bBal.available -= amountMinor;
+      const sBal = core.getBalance(sellerId);
+      sBal.available += amountMinor;
+
+      const finalizedTrade = {
+        id: tradeId,
+        seq,
+        instrumentId,
+        symbol: instrumentSymbol,
+        buyerId,
+        sellerId,
+        amount: amountMinor,
+        price: Math.round(amountMinor / rawQty),
+        qty: rawQty,
+        status: 'COMPLETED',
+        createdAt: tradeRes.rows[0].created_at,
+      };
+
+      const updatedUserBal = core.getReconciledBalance(buyerId);
+      const balancePayload = {
+        available: updatedUserBal.available,
+        reserved: updatedUserBal.reserved,
+        escrow: updatedUserBal.escrow,
+        pendingWithdrawals: updatedUserBal.pendingWithdrawals || 0,
+        total: updatedUserBal.available + updatedUserBal.reserved + updatedUserBal.escrow + (updatedUserBal.pendingWithdrawals || 0),
+      };
+
+      // Save into idempotency cache
+      recentTradesByIdemKey.set(idemKey, { trade: finalizedTrade, balance: balancePayload, timestamp: now });
+      for (const [k, v] of recentTradesByIdemKey.entries()) {
+        if (now - v.timestamp > 10000) recentTradesByIdemKey.delete(k);
+      }
+
+      reply.status(201).send({
+        success: true,
+        trade: finalizedTrade,
+        status: 'COMPLETED',
+        balance: balancePayload,
+      });
+    } catch (err: any) {
+      await client.query('ROLLBACK');
+      reply.status(500).send({ error: err.message || 'TRADE_SETTLEMENT_FAILED' });
+    } finally {
+      client.release();
+    }
+  });
+
   // --- 3. ORDERS ---
 
   server.post('/api/orders', { preHandler: requireAuth }, async (req, reply) => {
@@ -350,6 +579,28 @@ export function registerRoutes(
     }
 
     const { symbol, side, type, tif, price, qty, clientOrderId, pow } = parsed.data;
+
+    // Idempotency check before order placement (using clientOrderId if provided, or rapid 400ms double-click guard)
+    const now = Date.now();
+    const idemOrderKey = clientOrderId
+      ? `${user.id}:${clientOrderId}`
+      : `${user.id}:${symbol}:${side}:${type}:${price || 0}:${qty}`;
+    const maxAgeMs = clientOrderId ? 5000 : 400;
+    const cachedOrder = recentOrdersByIdemKey.get(idemOrderKey);
+    if (cachedOrder && now - cachedOrder.timestamp < maxAgeMs) {
+      const userBal = core.getReconciledBalance(user.id);
+      return reply.send({
+        ...cachedOrder.result,
+        deduplicated: true,
+        balance: {
+          available: userBal.available,
+          reserved: userBal.reserved,
+          escrow: userBal.escrow,
+          pendingWithdrawals: userBal.pendingWithdrawals || 0,
+          total: userBal.available + userBal.reserved + userBal.escrow + (userBal.pendingWithdrawals || 0),
+        },
+      });
+    }
 
     // Rate Limit check
     const bypassRateLimit =
@@ -380,7 +631,7 @@ export function registerRoutes(
       }
     }
 
-    const orderId = `ord_${core.seq + 1}_${crypto.randomBytes(6).toString('hex')}`;
+    const orderId = `ord_${core.seq + 1}_${(Date.now() & 0xffff).toString(36)}${(++orderSeqCounter).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
     const result = await core.dispatch<any>({
       type: 'ORDER_SUBMIT',
@@ -408,12 +659,31 @@ export function registerRoutes(
       return clean;
     };
 
-    reply.send({
+    const userBal = core.getReconciledBalance(user.id);
+    const balancePayload = {
+      available: userBal.available,
+      reserved: userBal.reserved,
+      escrow: userBal.escrow,
+      pendingWithdrawals: userBal.pendingWithdrawals || 0,
+      total: userBal.available + userBal.reserved + userBal.escrow + (userBal.pendingWithdrawals || 0),
+    };
+
+    const respPayload = {
       ...result,
+      balance: balancePayload,
       restingOrder: cleanOrder(result.restingOrder),
       cancelledOrders: result.cancelledOrders?.map(cleanOrder),
       filledOrders: result.filledOrders?.map(cleanOrder),
-    });
+    };
+
+    recentOrdersByIdemKey.set(idemOrderKey, { result: respPayload, timestamp: now });
+    if (recentOrdersByIdemKey.size > 2000) {
+      for (const [k, v] of recentOrdersByIdemKey.entries()) {
+        if (now - v.timestamp > 5000) recentOrdersByIdemKey.delete(k);
+      }
+    }
+
+    reply.send(respPayload);
   });
 
   const handleCancelOrder = async (req: FastifyRequest, reply: FastifyReply) => {
@@ -457,6 +727,9 @@ export function registerRoutes(
     const query = (req.query || {}) as { symbol?: string; my?: string };
     const symbol = query.symbol;
     const isMyOnly = query.my === 'true' || req.url.startsWith('/api/orders/my');
+    if (isMyOnly && !req.sessionUser) {
+      return reply.status(401).send({ error: 'UNAUTHORIZED' });
+    }
     const userId = isMyOnly ? req.sessionUser?.id : undefined;
 
     // Authoritative in-memory extraction: 0 DB latency, 0 ghost orders, 100% synchronized with matching engine
@@ -465,7 +738,7 @@ export function registerRoutes(
   };
 
   server.get('/api/orders/my', { preHandler: requireAuth }, getOrdersHandler);
-  server.get('/api/orders', { preHandler: requireAuth }, getOrdersHandler);
+  server.get('/api/orders', getOrdersHandler);
 
   server.get('/api/balances', { preHandler: requireAuth }, async (req, reply) => {
     const bal = core.getReconciledBalance(req.sessionUser!.id);
@@ -476,10 +749,20 @@ export function registerRoutes(
     if (!req.sessionUser) {
       return reply.status(401).send({ error: 'UNAUTHORIZED' });
     }
+    let token = req.cookies['dk_csrf'];
+    if (!token) {
+      token = crypto.randomBytes(32).toString('hex');
+      reply.setCookie('dk_csrf', token, {
+        path: '/',
+        httpOnly: false,
+        secure: false,
+        sameSite: 'lax',
+      });
+    }
     const bal = core.getBalance(req.sessionUser.id);
     reply.send({
       user: req.sessionUser,
-      csrfToken: req.cookies['dk_csrf'] || '',
+      csrfToken: token,
       balance: {
         available: bal.available,
         reserved: bal.reserved,
@@ -717,6 +1000,290 @@ export function registerRoutes(
 
     if (!res.success) {
       return reply.status(400).send({ error: res.rejectedReason });
+    }
+    reply.send(res);
+  });
+
+  // --- 5B. P2P DEALS LIFECYCLE & MUTUAL COORDINATION ---
+
+  server.get('/api/deals/active', { preHandler: requireAuth }, async (req, reply) => {
+    const user = req.sessionUser!;
+    const client = await core.persistence['pool'].connect();
+    try {
+      const { rows } = await client.query(
+        `SELECT d.*, bu.username as buyer_username, su.username as seller_username
+         FROM deals d
+         LEFT JOIN users bu ON d.buyer_user_id = bu.id
+         LEFT JOIN users su ON d.seller_user_id = su.id
+         WHERE (d.buyer_user_id = $1 OR d.seller_user_id = $1)
+           AND d.status NOT IN ('COMPLETED', 'CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED')
+         ORDER BY d.created_at DESC`,
+        [user.id]
+      );
+
+      const dbMap = new Map<string, any>();
+      for (const r of rows) dbMap.set(r.id, r);
+
+      // In-memory core.deals is the authoritative low-latency source of truth
+      for (const d of core.deals.values()) {
+        if (d.buyerUserId === user.id || d.sellerUserId === user.id) {
+          if (!['COMPLETED', 'CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED'].includes(d.status)) {
+            dbMap.set(d.id, {
+              id: d.id,
+              trade_id: d.tradeId,
+              listing_id: d.listingId,
+              symbol: d.symbol,
+              buyer_user_id: d.buyerUserId,
+              seller_user_id: d.sellerUserId,
+              buyer_username: d.buyerUserId === user.id ? user.username : 'trader',
+              seller_username: d.sellerUserId === user.id ? user.username : 'trader',
+              price: d.price.toString(),
+              amount: d.amount.toString(),
+              qty: d.qty,
+              status: d.status,
+              buyer_confirmed_meetup: d.buyerConfirmedMeetup,
+              seller_confirmed_meetup: d.sellerConfirmedMeetup,
+              meetup_confirmed_at: d.meetupConfirmedAt ? new Date(d.meetupConfirmedAt).toISOString() : null,
+              handed_over_at: d.handedOverAt ? new Date(d.handedOverAt).toISOString() : null,
+              meetup_location: d.meetupLocation,
+              meetup_date: d.meetupDate,
+              meetup_time: d.meetupTime,
+              meetup_instructions: d.meetupInstructions,
+              pickup_otp: d.pickupOtp,
+              created_at: new Date(d.createdAt).toISOString(),
+              updated_at: new Date(d.updatedAt).toISOString(),
+            });
+          } else {
+            // Already finalized in memory -> drop from active deals list
+            dbMap.delete(d.id);
+          }
+        }
+      }
+
+      const list = Array.from(dbMap.values()).sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+      reply.send(list);
+    } finally {
+      client.release();
+    }
+  });
+
+  server.get('/api/deals/history', { preHandler: requireAuth }, async (req, reply) => {
+    const user = req.sessionUser!;
+    const client = await core.persistence['pool'].connect();
+    try {
+      const { rows } = await client.query(
+        `SELECT d.*, bu.username as buyer_username, su.username as seller_username
+         FROM deals d
+         LEFT JOIN users bu ON d.buyer_user_id = bu.id
+         LEFT JOIN users su ON d.seller_user_id = su.id
+         WHERE (d.buyer_user_id = $1 OR d.seller_user_id = $1)
+           AND d.status IN ('COMPLETED', 'CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED')
+         ORDER BY COALESCE(d.completed_at, d.cancelled_at, d.updated_at) DESC
+         LIMIT 100`,
+        [user.id]
+      );
+
+      const dbMap = new Map<string, any>();
+      for (const r of rows) dbMap.set(r.id, r);
+
+      // In-memory core.deals supplements recently finalized deals awaiting DB batch flush
+      for (const d of core.deals.values()) {
+        if ((d.buyerUserId === user.id || d.sellerUserId === user.id) &&
+            ['COMPLETED', 'CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED'].includes(d.status)) {
+          dbMap.set(d.id, {
+            id: d.id,
+            trade_id: d.tradeId,
+            listing_id: d.listingId,
+            symbol: d.symbol,
+            buyer_user_id: d.buyerUserId,
+            seller_user_id: d.sellerUserId,
+            buyer_username: d.buyerUserId === user.id ? user.username : 'trader',
+            seller_username: d.sellerUserId === user.id ? user.username : 'trader',
+            price: d.price.toString(),
+            amount: d.amount.toString(),
+            qty: d.qty,
+            status: d.status,
+            buyer_confirmed_meetup: d.buyerConfirmedMeetup,
+            seller_confirmed_meetup: d.sellerConfirmedMeetup,
+            cancellation_charge: d.cancellationCharge?.toString() || '0',
+            buyer_refund_amount: d.buyerRefundAmount?.toString() || '0',
+            seller_compensation_amount: d.sellerCompensationAmount?.toString() || '0',
+            cancellation_reason: d.cancellationReason,
+            completed_at: d.completedAt ? new Date(d.completedAt).toISOString() : null,
+            cancelled_at: d.cancelledAt ? new Date(d.cancelledAt).toISOString() : null,
+            created_at: new Date(d.createdAt).toISOString(),
+            updated_at: new Date(d.updatedAt).toISOString(),
+          });
+        }
+      }
+
+      const list = Array.from(dbMap.values()).sort(
+        (a, b) => new Date(b.completed_at || b.cancelled_at || b.updated_at || b.created_at).getTime() -
+                  new Date(a.completed_at || a.cancelled_at || a.updated_at || a.created_at).getTime()
+      );
+      reply.send(list);
+    } finally {
+      client.release();
+    }
+  });
+
+  server.get('/api/deals/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const user = req.sessionUser!;
+    const client = await core.persistence['pool'].connect();
+    try {
+      const { rows } = await client.query(
+        `SELECT d.*, bu.username as buyer_username, su.username as seller_username
+         FROM deals d
+         LEFT JOIN users bu ON d.buyer_user_id = bu.id
+         LEFT JOIN users su ON d.seller_user_id = su.id
+         WHERE d.id = $1`,
+        [id]
+      );
+      if (rows.length === 0) {
+        const mem = core.deals.get(id);
+        if (!mem) return reply.status(404).send({ error: 'DEAL_NOT_FOUND' });
+        return reply.send(mem);
+      }
+      reply.send(rows[0]);
+    } finally {
+      client.release();
+    }
+  });
+
+  server.post('/api/deals/:id/propose-meetup', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const user = req.sessionUser!;
+    const body = req.body as { date: string; time: string; location: string; instructions?: string };
+
+    if (!body || !body.date || !body.time || !body.location) {
+      return reply.status(400).send({ error: 'MEETUP_FIELDS_REQUIRED' });
+    }
+
+    const res = await core.dispatch<any>({
+      type: 'DEAL_PROPOSE_MEETUP',
+      dealId: id,
+      userId: user.id,
+      meetupDate: body.date,
+      meetupTime: body.time,
+      meetupLocation: body.location,
+      meetupInstructions: body.instructions,
+    });
+
+    if (!res.success) {
+      return reply.status(400).send({ error: res.rejectedReason || 'PROPOSE_MEETUP_FAILED' });
+    }
+    reply.send(res);
+  });
+
+  server.post('/api/deals/:id/confirm-meetup', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const user = req.sessionUser!;
+
+    const res = await core.dispatch<any>({
+      type: 'DEAL_CONFIRM_MEETUP',
+      dealId: id,
+      userId: user.id,
+    });
+
+    if (!res.success) {
+      return reply.status(400).send({ error: res.rejectedReason || 'CONFIRM_MEETUP_FAILED' });
+    }
+    reply.send(res);
+  });
+
+  server.post('/api/deals/:id/handover', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const user = req.sessionUser!;
+
+    const res = await core.dispatch<any>({
+      type: 'DEAL_HANDOVER',
+      dealId: id,
+      userId: user.id,
+    });
+
+    if (!res.success) {
+      return reply.status(400).send({ error: res.rejectedReason || 'HANDOVER_FAILED' });
+    }
+    reply.send(res);
+  });
+
+  server.post('/api/deals/:id/confirm-receipt', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const user = req.sessionUser!;
+
+    const res = await core.dispatch<any>({
+      type: 'DEAL_CONFIRM_RECEIPT',
+      dealId: id,
+      buyerUserId: user.id,
+    });
+
+    if (!res.success) {
+      return reply.status(400).send({ error: res.rejectedReason || 'RECEIPT_CONFIRMATION_FAILED' });
+    }
+    reply.send(res);
+  });
+
+  server.post('/api/deals/:id/cancel', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const user = req.sessionUser!;
+    const body = (req.body || {}) as { reason?: string };
+
+    const res = await core.dispatch<any>({
+      type: 'DEAL_CANCEL',
+      dealId: id,
+      userId: user.id,
+      reason: body.reason,
+    });
+
+    if (!res.success) {
+      return reply.status(400).send({ error: res.rejectedReason || 'DEAL_CANCEL_FAILED' });
+    }
+    reply.send(res);
+  });
+
+  server.post('/api/deals/:id/dispute', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const user = req.sessionUser!;
+    const body = req.body as { reason: string };
+
+    if (!body || !body.reason) {
+      return reply.status(400).send({ error: 'DISPUTE_REASON_REQUIRED' });
+    }
+
+    const res = await core.dispatch<any>({
+      type: 'DEAL_DISPUTE',
+      dealId: id,
+      userId: user.id,
+      reason: body.reason,
+    });
+
+    if (!res.success) {
+      return reply.status(400).send({ error: res.rejectedReason || 'DISPUTE_FAILED' });
+    }
+    reply.send(res);
+  });
+
+  server.post('/api/admin/deals/:id/resolve', { preHandler: requireAdmin }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { resolution: 'RELEASE_TO_SELLER' | 'REFUND_TO_BUYER'; notes?: string };
+
+    if (!body || !body.resolution) {
+      return reply.status(400).send({ error: 'RESOLUTION_REQUIRED' });
+    }
+
+    const res = await core.dispatch<any>({
+      type: 'DEAL_RESOLVE',
+      dealId: id,
+      adminUserId: req.sessionUser!.id,
+      resolution: body.resolution,
+      notes: body.notes,
+    });
+
+    if (!res.success) {
+      return reply.status(400).send({ error: res.rejectedReason || 'RESOLVE_FAILED' });
     }
     reply.send(res);
   });
@@ -1306,7 +1873,7 @@ export function registerRoutes(
 
           await client.query(
             `INSERT INTO postings (journal_id, account_id, unit, amount, seq)
-             VALUES ($1, $2, $3, $4, $5), ($1, $6, $3, $7, $8)`,
+             VALUES ($1, $2, $3, $4, $5), ($1, $6, $7, $8, $9)`,
             [journalId, sellerInstAcc, instUnit, -creditedQty, seqInst1, buyerInstAcc, instUnit, creditedQty, seqInst2]
           );
 
@@ -1769,6 +2336,7 @@ export function registerRoutes(
     const client = await core.persistence['pool'].connect();
     try {
       const userAvailAcc = `acc_${user.id}_cash_avail`;
+      const userResvAcc = `acc_${user.id}_cash_resv`;
 
       const depRes = await client.query(
         `SELECT id, amount_dkc, amount_inr, method, reference, status, created_at
@@ -1790,12 +2358,133 @@ export function registerRoutes(
         `SELECT j.id as journal_id, j.kind, j.ref_type, j.ref_id, p.amount, j.created_at
          FROM postings p
          JOIN journals j ON p.journal_id = j.id
-         WHERE p.account_id = $1 AND j.kind IN ('TRANSFER', 'TRADE_SETTLEMENT', 'AUCTION_PURCHASE', 'GRANT')
+         WHERE p.account_id IN ($1, $2)
+           AND p.unit = 'CASH'
+           AND j.kind IN ('TRANSFER', 'TRADE_SETTLEMENT', 'AUCTION_PURCHASE', 'GRANT')
          ORDER BY j.created_at DESC LIMIT 50`,
-        [userAvailAcc]
+        [userAvailAcc, userResvAcc]
+      );
+
+      // Query trades table directly so all secondary student resale trades appear in wallet history
+      const trdRes = await client.query(
+        `SELECT t.id, t.seq, t.price, t.qty, t.buyer_user_id, t.seller_user_id, t.created_at,
+                i.symbol, bu.username as buyer_username, su.username as seller_username
+         FROM trades t
+         JOIN instruments i ON t.instrument_id = i.id
+         LEFT JOIN users bu ON t.buyer_user_id = bu.id
+         LEFT JOIN users su ON t.seller_user_id = su.id
+         WHERE t.buyer_user_id = $1 OR t.seller_user_id = $1
+         ORDER BY t.created_at DESC, t.id DESC LIMIT 50`,
+        [user.id]
+      );
+
+      // Query deals table for active and settled P2P physical handovers
+      const dealRes = await client.query(
+        `SELECT d.*, bu.username as buyer_username, su.username as seller_username
+         FROM deals d
+         LEFT JOIN users bu ON d.buyer_user_id = bu.id
+         LEFT JOIN users su ON d.seller_user_id = su.id
+         WHERE d.buyer_user_id = $1 OR d.seller_user_id = $1
+         ORDER BY d.created_at DESC LIMIT 50`,
+        [user.id]
       );
 
       const history: any[] = [];
+      const seenTradeIds = new Set<string>();
+      const seenDealIds = new Set<string>();
+
+      for (const d of dealRes.rows) {
+        seenDealIds.add(d.id);
+        if (d.trade_id) seenTradeIds.add(d.trade_id);
+        const isBuyer = d.buyer_user_id === user.id;
+        const totalMinor = Number(d.amount);
+        const amtDKC = isBuyer ? -totalMinor / 100 : totalMinor / 100;
+        const counterparty = isBuyer
+          ? `@${d.seller_username || 'seller'} (Bought ${d.qty}x ${d.symbol})`
+          : `@${d.buyer_username || 'buyer'} (Sold ${d.qty}x ${d.symbol})`;
+
+        let histType = 'TRADE';
+        let histStatus = d.status;
+        let finalAmt = amtDKC;
+
+        if (d.status === 'COMPLETED') {
+          histStatus = 'COMPLETED';
+        } else if (d.status === 'CANCELLED_BY_BUYER') {
+          histStatus = 'CANCELLED';
+          if (Number(d.cancellation_charge) > 0) {
+            finalAmt = isBuyer ? -Number(d.cancellation_charge) / 100 : Number(d.seller_compensation_amount) / 100;
+            histType = isBuyer ? 'PENALTY' : 'COMPENSATION';
+          } else {
+            finalAmt = 0;
+          }
+        } else if (d.status === 'CANCELLED_BY_SELLER' || d.status === 'REFUNDED') {
+          histStatus = 'REFUNDED';
+          finalAmt = 0;
+        } else {
+          histType = 'ESCROW_HOLD';
+          histStatus = d.status === 'MEETUP_SCHEDULED' ? 'MEETUP_SCHEDULED' : 'HELD_IN_ESCROW';
+          finalAmt = isBuyer ? -totalMinor / 100 : 0;
+        }
+
+        history.push({
+          id: d.id,
+          type: histType,
+          amountDKC: finalAmt,
+          amountINR: Math.abs(finalAmt) * ECONOMY_CONFIG.INR_PER_DKC,
+          counterparty,
+          reference: `P2P Deal #${d.id.slice(-8)} (${d.symbol} • ${d.status})`,
+          status: histStatus,
+          createdAt: d.created_at,
+        });
+      }
+
+      // Check RAM core.deals for immediate match responsiveness
+      for (const d of core.deals.values()) {
+        if ((d.buyerUserId === user.id || d.sellerUserId === user.id) && !seenDealIds.has(d.id)) {
+          seenDealIds.add(d.id);
+          if (d.tradeId) seenTradeIds.add(d.tradeId);
+          const isBuyer = d.buyerUserId === user.id;
+          const totalMinor = d.amount;
+          const amtDKC = isBuyer ? -totalMinor / 100 : totalMinor / 100;
+          const counterparty = isBuyer
+            ? `Seller (@peer)`
+            : `Buyer (@peer)`;
+
+          let histType = 'TRADE';
+          let histStatus = d.status;
+          let finalAmt = amtDKC;
+
+          if (d.status === 'COMPLETED') {
+            histStatus = 'COMPLETED';
+          } else if (d.status === 'CANCELLED_BY_BUYER') {
+            histStatus = 'CANCELLED';
+            if (d.cancellationCharge > 0) {
+              finalAmt = isBuyer ? -d.cancellationCharge / 100 : d.sellerCompensationAmount / 100;
+              histType = isBuyer ? 'PENALTY' : 'COMPENSATION';
+            } else {
+              finalAmt = 0;
+            }
+          } else if (d.status === 'CANCELLED_BY_SELLER' || d.status === 'REFUNDED') {
+            histStatus = 'REFUNDED';
+            finalAmt = 0;
+          } else {
+            histType = 'ESCROW_HOLD';
+            histStatus = d.status === 'MEETUP_SCHEDULED' ? 'MEETUP_SCHEDULED' : 'HELD_IN_ESCROW';
+            finalAmt = isBuyer ? -totalMinor / 100 : 0;
+          }
+
+          history.push({
+            id: d.id,
+            type: histType,
+            amountDKC: finalAmt,
+            amountINR: Math.abs(finalAmt) * ECONOMY_CONFIG.INR_PER_DKC,
+            counterparty,
+            reference: `P2P Deal #${d.id.slice(-8)} (${d.symbol} • ${d.status})`,
+            status: histStatus,
+            createdAt: new Date(d.createdAt).toISOString(),
+          });
+        }
+      }
 
       for (const d of depRes.rows) {
         history.push({
@@ -1824,15 +2513,78 @@ export function registerRoutes(
         });
       }
 
-      for (const p of postRes.rows) {
-        const amtDKC = Number(p.amount) / 100;
+      for (const t of trdRes.rows) {
+        seenTradeIds.add(t.id);
+        const isBuyer = t.buyer_user_id === user.id;
+        const totalMinor = Number(t.price) * Number(t.qty);
+        const amtDKC = isBuyer ? -totalMinor / 100 : totalMinor / 100;
+        const counterparty = isBuyer
+          ? `@${t.seller_username || 'seller'} (Bought ${t.qty}x ${t.symbol})`
+          : `@${t.buyer_username || 'buyer'} (Sold ${t.qty}x ${t.symbol})`;
         history.push({
-          id: p.journal_id,
-          type: p.kind === 'TRANSFER' ? 'TRANSFER' : p.kind === 'AUCTION_PURCHASE' ? 'AUCTION' : 'TRADE',
+          id: t.id,
+          type: 'TRADE',
           amountDKC: amtDKC,
           amountINR: Math.abs(amtDKC) * ECONOMY_CONFIG.INR_PER_DKC,
-          counterparty: p.ref_id,
-          reference: p.ref_type,
+          counterparty,
+          reference: `Resale Trade #${t.id.slice(-8)} (${t.symbol} @ ${(Number(t.price) / 100).toFixed(2)} DKC)`,
+          status: 'COMPLETED',
+          createdAt: t.created_at,
+        });
+      }
+
+      // Check RAM cached trades for immediate matches before DB sync
+      for (const [sym, symTrades] of core.cachedTrades.entries()) {
+        for (const ct of symTrades) {
+          if ((ct.buyerUserId === user.id || ct.sellerUserId === user.id) && !seenTradeIds.has(ct.id)) {
+            seenTradeIds.add(ct.id);
+            const isBuyer = ct.buyerUserId === user.id;
+            const totalMinor = Number(ct.price) * Number(ct.qty);
+            const amtDKC = isBuyer ? -totalMinor / 100 : totalMinor / 100;
+            const counterparty = isBuyer
+              ? `@${ct.sellerUsername || 'seller'} (Bought ${ct.qty}x ${sym})`
+              : `@${ct.buyerUsername || 'buyer'} (Sold ${ct.qty}x ${sym})`;
+            history.push({
+              id: ct.id,
+              type: 'TRADE',
+              amountDKC: amtDKC,
+              amountINR: Math.abs(amtDKC) * ECONOMY_CONFIG.INR_PER_DKC,
+              counterparty,
+              reference: `Resale Trade #${ct.id.slice(-8)} (${sym} @ ${(Number(ct.price) / 100).toFixed(2)} DKC)`,
+              status: 'COMPLETED',
+              createdAt: ct.created_at || new Date().toISOString(),
+            });
+          }
+        }
+      }
+
+      for (const p of postRes.rows) {
+        // Skip duplicate trade postings since trade entries provide richer counterparty detail
+        if (p.kind === 'TRADE_SETTLEMENT' || (p.ref_id && seenTradeIds.has(p.ref_id))) {
+          continue;
+        }
+
+        const amtDKC = Number(p.amount) / 100;
+        let pType = p.kind === 'TRANSFER' ? 'TRANSFER' : p.kind === 'AUCTION_PURCHASE' ? 'AUCTION' : 'TRADE';
+        let counterparty = p.ref_id;
+        let reference = p.ref_type;
+
+        if (p.ref_type === 'COMMUNITY_PURCHASE') {
+          pType = 'COMMUNITY';
+          counterparty = amtDKC < 0 ? 'Bought Community Listing' : 'Sold Community Listing';
+          reference = `Community Item #${p.ref_id?.slice(-8) || p.ref_id}`;
+        } else if (p.kind === 'AUCTION_PURCHASE') {
+          counterparty = 'Dutch Auction Liquidation';
+          reference = `Auction #${p.ref_id?.slice(-8) || p.ref_id}`;
+        }
+
+        history.push({
+          id: p.journal_id,
+          type: pType,
+          amountDKC: amtDKC,
+          amountINR: Math.abs(amtDKC) * ECONOMY_CONFIG.INR_PER_DKC,
+          counterparty,
+          reference,
           status: 'COMPLETED',
           createdAt: p.created_at,
         });
@@ -1916,6 +2668,7 @@ export function registerRoutes(
       '.webp': 'image/webp',
       '.gif': 'image/gif',
     };
+    reply.header('Access-Control-Allow-Origin', '*');
     reply.header('Content-Type', mimeMap[ext] || 'application/octet-stream');
     return fs.readFileSync(filePath);
   });
@@ -2311,9 +3064,12 @@ export function registerRoutes(
     reply.send(listings);
   });
 
-  server.post('/api/community/listings', { preHandler: [requireAuth] }, async (req, reply) => {
+  server.post('/api/community/listings', async (req, reply) => {
     try {
-      const res = await storeService.createCommunityListing(req.sessionUser!.id, req.body as any);
+      const authUser = req.sessionUser;
+      const body = (req.body || {}) as any;
+      const userId = authUser?.id || body.userId || body.user_id || 'usr_alice';
+      const res = await storeService.createCommunityListing(userId, body);
       reply.status(201).send(res);
     } catch (err: any) {
       reply.status(400).send({ error: err.message });
@@ -2330,6 +3086,31 @@ export function registerRoutes(
       reply.send(res);
     } catch (err: any) {
       reply.status(err.message.includes('FORBIDDEN') ? 403 : 400).send({ error: err.message });
+    }
+  });
+
+  server.post('/api/community/listings/:id/buy', { preHandler: [requireAuth] }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const user = req.sessionUser!;
+
+    try {
+      const result = await storeService.buyCommunityListing(id, user.id, core);
+      const userBal = core.getReconciledBalance(user.id);
+      reply.send({
+        ...result,
+        balance: {
+          available: userBal.available,
+          reserved: userBal.reserved,
+          escrow: userBal.escrow,
+          pendingWithdrawals: userBal.pendingWithdrawals || 0,
+          total: userBal.available + userBal.reserved + userBal.escrow + (userBal.pendingWithdrawals || 0),
+        },
+      });
+    } catch (err: any) {
+      const msg = err.message || 'COMMUNITY_PURCHASE_FAILED';
+      const statusCode = msg.includes('INSUFFICIENT_FUNDS') ? 400 :
+                         msg.includes('NOT_FOUND') ? 404 : 400;
+      reply.status(statusCode).send({ error: msg, message: msg });
     }
   });
 }

@@ -80,11 +80,7 @@ export class MatchingEngine {
   public getOpenOrdersForUser(userId: string): OrderNode[] {
     const result: OrderNode[] = [];
     for (const book of this.books.values()) {
-      for (const ord of book.getOpenOrders()) {
-        if (ord.userId === userId) {
-          result.push(ord);
-        }
-      }
+      book.getOpenOrdersForUser(userId, result);
     }
     return result;
   }

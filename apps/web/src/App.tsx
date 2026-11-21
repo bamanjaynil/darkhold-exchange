@@ -12,6 +12,7 @@ import {
   verifyMerkleSumProof,
   computeLeafHash,
   SolvencyInclusionProof,
+  solvePoW,
 } from '@darkhold/shared';
 import { LiquidityCanvas, BookLevel } from './components/LiquidityCanvas.js';
 import { OfficialFestStore } from './components/OfficialFestStore.js';
@@ -25,6 +26,7 @@ import { OrgWorkspaceView } from './components/OrgWorkspaceView.js';
 import { CommunityMarketplaceView } from './components/CommunityMarketplaceView.js';
 import { PurchaseConfirmationModal, PurchaseConfirmationData } from './components/PurchaseConfirmationModal.js';
 import { getInstrumentMeta } from './constants/instruments.js';
+import { OFFICIAL_ARTWORKS } from './constants/presetArtworks.js';
 
 type Instrument = {
   id: string;
@@ -132,6 +134,7 @@ export default function App() {
   const [priceInput, setPriceInput] = useState<string>('1500');
   const [qtyInput, setQtyInput] = useState<string>('1');
   const [orderSubmitting, setOrderSubmitting] = useState<boolean>(false);
+  const isSubmittingOrderRef = useRef<boolean>(false);
   const [orderMessage, setOrderMessage] = useState<{ text: string; error: boolean } | null>(null);
 
   // Dutch Auctions State
@@ -212,41 +215,33 @@ export default function App() {
       clearTimeout(timeoutId);
       if (res.ok) {
         const data = await res.json();
-        setUser(data.user);
-        setBalance(data.balance);
-        if (data.csrfToken) {
-          setCsrfToken(data.csrfToken);
-        }
-        void fetchHoldings();
-      } else if (res.status === 401) {
-        // Auto-login as alice on initial unauthenticated visit so user never lands on empty 0.00 DKC state
-        try {
-          const autoRes = await fetch('/api/auth/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ username: 'alice', password: 'password123' }),
-          });
-          if (autoRes.ok) {
-            const data = await autoRes.json();
-            setUser(data.user);
-            setBalance(data.balance);
-            if (data.csrfToken) {
-              setCsrfToken(data.csrfToken);
-            }
-            void fetchHoldings();
-            return;
+        if (data && data.user) {
+          setUser(data.user);
+          if (data.balance) setBalance(data.balance);
+          if (data.csrfToken) {
+            setCsrfToken(data.csrfToken);
           }
-        } catch {}
+          void fetchHoldings();
+        } else {
+          setUser(null);
+          setHoldings([]);
+          setMyOrders([]);
+        }
+      } else {
         setUser(null);
         setHoldings([]);
         setMyOrders([]);
       }
-    } catch {}
+    } catch {
+      setUser(null);
+      setHoldings([]);
+      setMyOrders([]);
+    }
   };
 
   const fetchHoldings = async () => {
     try {
+      if (!user) return;
       const res = await fetch('/api/wallet/holdings', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
@@ -260,7 +255,12 @@ export default function App() {
       const res = await fetch('/api/instruments');
       if (res.ok) {
         const list = await res.json();
-        const nonBench = list.filter((i: any) => !i.isBenchmark && i.symbol !== 'BENCH-X');
+        const nonBench = list
+          .filter((i: any) => !i.isBenchmark && i.symbol !== 'BENCH-X')
+          .map((inst: any) => ({
+            ...inst,
+            imageUrl: inst.imageUrl || OFFICIAL_ARTWORKS[inst.symbol] || null,
+          }));
         setInstruments(nonBench);
         if (nonBench.length > 0 && (!selectedSymbol || selectedSymbol === 'BENCH-X')) {
           setSelectedSymbol(nonBench[0].symbol);
@@ -302,7 +302,19 @@ export default function App() {
 
       if (tradesRes && tradesRes.ok) {
         const trs = await tradesRes.json();
-        setTrades(trs || []);
+        if (Array.isArray(trs)) {
+          const seen = new Set<string>();
+          const deduped: any[] = [];
+          for (const tr of trs) {
+            if (tr && tr.id && !seen.has(tr.id)) {
+              seen.add(tr.id);
+              deduped.push(tr);
+            }
+          }
+          setTrades(deduped);
+        } else {
+          setTrades([]);
+        }
       }
 
       if (statsRes && statsRes.ok) {
@@ -318,7 +330,13 @@ export default function App() {
         ]);
         if (meRes && meRes.ok) {
           const meData = await meRes.json();
-          if (meData.balance) setBalance(meData.balance);
+          if (meData.user) {
+            if (meData.balance) setBalance(meData.balance);
+          } else {
+            setUser(null);
+            setHoldings([]);
+            setMyOrders([]);
+          }
         }
         if (holdRes && holdRes.ok) {
           const hData = await holdRes.json();
@@ -508,7 +526,10 @@ export default function App() {
               }
             } else if (msg.channel === `trades:${selectedSymbol}`) {
               if (msg.data) {
-                setTrades((prev) => [msg.data, ...prev].slice(0, 50));
+                setTrades((prev) => {
+                  if (prev.some((t) => t.id === msg.data.id)) return prev;
+                  return [msg.data, ...prev].slice(0, 50);
+                });
               }
             } else if (msg.channel === 'me') {
               if (msg.data.balance) setBalance(msg.data.balance);
@@ -541,7 +562,7 @@ export default function App() {
     };
   }, [selectedSymbol, user?.id]);
 
-  // --- Universal High-Speed Order Dispatch (with Web Worker PoW) ---
+  // --- Universal High-Speed Order Dispatch (Sub-20ms Direct PoW) ---
   const dispatchOrderDirect = (params: {
     symbol: string;
     side: 'BUY' | 'SELL';
@@ -557,6 +578,12 @@ export default function App() {
         return;
       }
 
+      if (isSubmittingOrderRef.current || orderSubmitting) {
+        resolve({ success: false, error: 'Trade submission in progress, please wait...' });
+        return;
+      }
+
+      isSubmittingOrderRef.current = true;
       setOrderSubmitting(true);
       setOrderMessage(null);
 
@@ -564,12 +591,19 @@ export default function App() {
         const curInst = instruments.find((i) => i.symbol === params.symbol);
         const ceiling = curInst ? calculateCollarCeiling(curInst.faceValue, curInst.collarBps) : 165000;
 
-        if (params.type === 'LIMIT' && params.price && params.price > ceiling) {
-          const errText = `Price exceeds anti-scalping collar ceiling of ${formatDKC(ceiling)}`;
-          setOrderMessage({ text: errText, error: true });
-          setOrderSubmitting(false);
-          resolve({ success: false, error: errText });
-          return;
+        let finalPrice = params.price;
+        if (params.type === 'LIMIT') {
+          if (!finalPrice || isNaN(finalPrice) || finalPrice <= 0) {
+            finalPrice = curInst ? curInst.faceValue : 150000;
+          }
+          if (finalPrice > ceiling) {
+            const errText = `Price exceeds anti-scalping collar ceiling of ${formatDKC(ceiling)}`;
+            setOrderMessage({ text: errText, error: true });
+            isSubmittingOrderRef.current = false;
+            setOrderSubmitting(false);
+            resolve({ success: false, error: errText });
+            return;
+          }
         }
 
         // Fetch PoW challenge
@@ -579,78 +613,80 @@ export default function App() {
         }
         const challenge = await chalRes.json();
 
-        // Solve in Web Worker
-        const worker = new Worker(new URL('./pow-worker.ts', import.meta.url), { type: 'module' });
-        worker.onerror = (we) => {
-          worker.terminate();
-          setOrderSubmitting(false);
-          const errText = 'PoW Worker error: ' + (we.message || 'Worker failure');
+        // High-speed PoW solution (<1ms for difficulty <= 14 bits)
+        let nonce: string | null = null;
+        if (challenge.difficultyBits <= 14) {
+          nonce = solvePoW(challenge.seed, challenge.difficultyBits, 2_000_000);
+        }
+        if (!nonce) {
+          nonce = await new Promise<string>((resolveWorker, rejectWorker) => {
+            const worker = new Worker(new URL('./pow-worker.ts', import.meta.url), { type: 'module' });
+            worker.onerror = (we) => {
+              worker.terminate();
+              rejectWorker(new Error('PoW Worker error: ' + (we.message || 'Worker failure')));
+            };
+            worker.onmessage = (we) => {
+              worker.terminate();
+              resolveWorker(we.data.nonce);
+            };
+            worker.postMessage({ seed: challenge.seed, difficultyBits: challenge.difficultyBits });
+          });
+        }
+
+        const orderPayload = {
+          clientOrderId: `web_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+          symbol: params.symbol,
+          side: params.side,
+          type: params.type,
+          tif: params.type === 'MARKET' ? 'IOC' : (params.tif || 'GTC'),
+          price: params.type === 'MARKET' ? undefined : Math.round(finalPrice!),
+          qty: params.qty,
+          pow: {
+            challengeId: challenge.challengeId,
+            nonce,
+          },
+        };
+
+        const res = await fetch('/api/orders', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-csrf-token': csrfToken,
+          },
+          credentials: 'include',
+          body: JSON.stringify(orderPayload),
+        });
+
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          if (data.balance) {
+            setBalance(data.balance);
+          }
+          const tradeCount = data.trades?.length || 0;
+          setOrderMessage({
+            text: tradeCount > 0
+              ? (params.symbol === 'BENCH-X'
+                  ? `⚡ Instant Match SUCCESS: Executed ${tradeCount} trade(s) on ${params.symbol}!`
+                  : `⚡ Instant Match SUCCESS: Executed ${tradeCount} trade(s) on ${params.symbol}! Escrow custody locked. View progress in Community -> Active Deals.`)
+              : `✓ Order ${data.restingOrder ? 'resting in book' : 'executed'} successfully! Seq #${data.seq}`,
+            error: false,
+          });
+          await fetchSession();
+          await fetchHoldings();
+          void syncMarketState();
+          resolve({ success: true, data });
+        } else {
+          const errText = data.error || 'Order rejected by exchange';
           setOrderMessage({ text: errText, error: true });
           resolve({ success: false, error: errText });
-        };
-
-        worker.postMessage({ seed: challenge.seed, difficultyBits: challenge.difficultyBits });
-
-        worker.onmessage = async (we) => {
-          const { nonce } = we.data;
-          worker.terminate();
-
-          try {
-            const orderPayload = {
-              clientOrderId: `web_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
-              symbol: params.symbol,
-              side: params.side,
-              type: params.type,
-              tif: params.tif || 'GTC',
-              price: params.price,
-              qty: params.qty,
-              pow: {
-                challengeId: challenge.challengeId,
-                nonce,
-              },
-            };
-
-            const res = await fetch('/api/orders', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'x-csrf-token': csrfToken,
-              },
-              credentials: 'include',
-              body: JSON.stringify(orderPayload),
-            });
-
-            const data = await res.json().catch(() => ({}));
-            if (res.ok) {
-              const tradeCount = data.trades?.length || 0;
-              setOrderMessage({
-                text: tradeCount > 0
-                  ? `⚡ Instant Match SUCCESS: Executed ${tradeCount} trade(s) on ${params.symbol}!`
-                  : `✓ Order ${data.restingOrder ? 'resting in book' : 'executed'} successfully! Seq #${data.seq}`,
-                error: false,
-              });
-              await fetchSession();
-              await fetchHoldings();
-              void syncMarketState();
-              resolve({ success: true, data });
-            } else {
-              const errText = data.error || 'Order rejected by exchange';
-              setOrderMessage({ text: errText, error: true });
-              resolve({ success: false, error: errText });
-            }
-          } catch (err: any) {
-            const errText = err.message || 'Network error submitting order';
-            setOrderMessage({ text: errText, error: true });
-            resolve({ success: false, error: errText });
-          } finally {
-            setOrderSubmitting(false);
-          }
-        };
+        }
       } catch (err: any) {
-        setOrderSubmitting(false);
-        const errText = err.message || 'Error submitting order';
+        const errText = err.message || 'Network error submitting order';
         setOrderMessage({ text: errText, error: true });
         resolve({ success: false, error: errText });
+      } finally {
+        isSubmittingOrderRef.current = false;
+        setOrderSubmitting(false);
       }
     });
   };
@@ -667,6 +703,7 @@ export default function App() {
   };
 
   const handleSnipeOrder = async (order: OpenOrder) => {
+    if (orderSubmitting || isSubmittingOrderRef.current) return;
     const counterSide = order.side === 'BUY' ? 'SELL' : 'BUY';
     setPriceInput((order.price / 100).toString());
     setQtyInput(order.remaining_qty.toString());
@@ -701,49 +738,33 @@ export default function App() {
     });
   };
 
-  // 3. Order Placement with Web Worker PoW
+  // 3. High-Speed Direct Order Placement (Sub-20ms)
   const handleSubmitOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    const priceMinor = orderType === 'LIMIT' ? toMinorUnits(parseFloat(priceInput)) : undefined;
-    const qty = parseInt(qtyInput, 10);
+    if (orderSubmitting || isSubmittingOrderRef.current) return;
 
-    if (side === 'BUY') {
-      const unitPriceDkc = orderType === 'LIMIT' ? (parseFloat(priceInput) || 0) : ((selectedInstrument?.faceValue || 150000) / 100);
-      setConfirmPurchaseData({
-        title: `${selectedSymbol} — ${selectedInstrument?.name || 'Resale Pass'}`,
-        imageUrl: selectedInstrument?.imageUrl || undefined,
-        variantTitle: `${orderType} BUY • Qty: ${qty} Unit${qty > 1 ? 's' : ''}`,
-        quantity: qty,
-        unitPriceDkc,
-        sellerName: 'Student Resale Market OrderBook',
-        isEscrow: !!selectedInstrument?.escrowRequired,
-        onConfirm: async () => {
-          const res = await dispatchOrderDirect({
-            symbol: selectedSymbol,
-            side,
-            price: priceMinor,
-            qty,
-            type: orderType,
-            tif,
-          });
-          if (res.success) {
-            await fetchSession();
-            await fetchHoldings();
-            await syncMarketState();
-            return {
-              success: true,
-              journalId: `TXN #L2-${res.data?.seq || Math.floor(10000 + Math.random() * 90000)}`,
-              pickupToken: `PK-${Math.floor(100000 + Math.random() * 900000)}`,
-            };
-          } else {
-            return {
-              success: false,
-              error: res.error || 'Order placement rejected',
-            };
-          }
-        },
-      });
+    if (!user) {
+      setShowAuthModal(true);
       return;
+    }
+
+    const qty = parseInt(qtyInput, 10) || 1;
+    const curInst = instruments.find((i) => i.symbol === selectedSymbol);
+    const defaultFaceMinor = curInst ? curInst.faceValue : 150000;
+    const priceMinor = orderType === 'LIMIT'
+      ? (parseFloat(priceInput) ? toMinorUnits(parseFloat(priceInput)) : defaultFaceMinor)
+      : undefined;
+
+    if (side === 'SELL') {
+      const curHolding = holdings.find((h) => h.symbol === selectedSymbol);
+      const heldAvail = curHolding ? curHolding.available : 0;
+      if (heldAvail < qty) {
+        setOrderMessage({
+          text: `⚠️ Cannot place sell order: You hold ${heldAvail} units of ${selectedSymbol}, but attempted to sell ${qty}. First buy or acquire units in your portfolio.`,
+          error: true,
+        });
+        return;
+      }
     }
 
     await dispatchOrderDirect({
@@ -752,7 +773,7 @@ export default function App() {
       price: priceMinor,
       qty,
       type: orderType,
-      tif,
+      tif: orderType === 'MARKET' ? 'IOC' : tif,
     });
   };
 
@@ -1531,7 +1552,11 @@ export default function App() {
                       </label>
                       <select
                         value={orderType}
-                        onChange={(e) => setOrderType(e.target.value as any)}
+                        onChange={(e) => {
+                          const newType = e.target.value as 'LIMIT' | 'MARKET';
+                          setOrderType(newType);
+                          if (newType === 'MARKET') setTif('IOC');
+                        }}
                         style={{ width: '100%' }}
                       >
                         <option value="LIMIT">LIMIT</option>
@@ -1738,12 +1763,53 @@ export default function App() {
                   <div style={{ color: '#64748B', fontSize: 11, padding: '4px 0' }}>No assets held</div>
                 ) : (
                   holdings.filter((h) => h.symbol !== 'BENCH-X').map((h) => (
-                    <div key={h.symbol} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
-                      <span style={{ color: '#F8FAFC' }}>{h.symbol}</span>
-                      <span>
-                        <strong style={{ color: '#10B981' }}>{h.available}</strong>
-                        {h.reserved > 0 && <span style={{ color: '#F59E0B' }}> (+{h.reserved} res)</span>}
-                      </span>
+                    <div key={h.symbol} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', borderBottom: '1px solid #161F30' }}>
+                      <span style={{ color: '#F8FAFC', fontWeight: 700 }}>{h.symbol}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span>
+                          <strong style={{ color: '#10B981' }}>{h.available}</strong>
+                          {h.reserved > 0 && <span style={{ color: '#F59E0B', fontSize: 10 }}> (+{h.reserved} res)</span>}
+                        </span>
+                        {h.available > 0 && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setSelectedSymbol(h.symbol);
+                              setSide('SELL');
+                              setQtyInput('1');
+                              const inst = instruments.find((i) => i.symbol === h.symbol);
+                              const priceMinor = inst ? inst.faceValue : 150000;
+                              setPriceInput((priceMinor / 100).toFixed(2));
+                              setOrderMessage({
+                                text: `⚡ 1-Click Dispatch: Submitting SELL 1x ${h.symbol} @ ${(priceMinor / 100).toFixed(2)} DKC...`,
+                                error: false,
+                              });
+                              await dispatchOrderDirect({
+                                symbol: h.symbol,
+                                side: 'SELL',
+                                price: priceMinor,
+                                qty: 1,
+                                type: 'LIMIT',
+                                tif: 'GTC',
+                              });
+                            }}
+                            style={{
+                              background: 'rgba(255, 42, 84, 0.15)',
+                              border: '1px solid #FF2A54',
+                              color: '#FF2A54',
+                              borderRadius: 3,
+                              padding: '2px 6px',
+                              fontSize: 9,
+                              fontWeight: 800,
+                              cursor: 'pointer',
+                              fontFamily: '"JetBrains Mono", monospace',
+                            }}
+                            title={`Instant 1-Click Sell 1 unit of ${h.symbol} at face value`}
+                          >
+                            ⚡ SELL
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))
                 )}
@@ -2170,6 +2236,7 @@ export default function App() {
                           <th>PRICE</th>
                           <th>QTY</th>
                           <th>PARTIES</th>
+                          <th>LIFECYCLE STATUS</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2179,6 +2246,8 @@ export default function App() {
                           const sellerIsMe = user && (t.sellerUserId === user.id || t.sellerUsername === user.username);
                           const buyerLabel = buyerIsMe ? 'YOU' : getTraderLabel(t.buyerUsername || t.buyerUserId);
                           const sellerLabel = sellerIsMe ? 'YOU' : getTraderLabel(t.sellerUsername || t.sellerUserId);
+                          const isBench = t.symbol === 'BENCH-X';
+                          const statusLabel = isBench ? 'SETTLED' : (t.status || 'ESCROW LOCKED');
 
                           return (
                             <tr key={t.id || idx}>
@@ -2200,6 +2269,30 @@ export default function App() {
                                 <span style={{ color: sellerIsMe ? '#F59E0B' : '#CBD5E1', fontWeight: sellerIsMe ? 800 : 500 }}>
                                   {sellerLabel}
                                 </span>
+                              </td>
+                              <td>
+                                {isBench ? (
+                                  <span style={{ color: '#10B981', fontSize: 10, fontWeight: 700 }}>✓ SETTLED</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setActiveTab('community')}
+                                    style={{
+                                      background: 'rgba(168, 85, 247, 0.15)',
+                                      border: '1px solid rgba(168, 85, 247, 0.4)',
+                                      color: '#C084FC',
+                                      padding: '1px 6px',
+                                      borderRadius: 3,
+                                      fontSize: 9,
+                                      fontWeight: 800,
+                                      cursor: 'pointer',
+                                      fontFamily: '"JetBrains Mono", monospace'
+                                    }}
+                                    title="View active deal & meetup handover progress in Community tab"
+                                  >
+                                    ⚡ {statusLabel.replace(/_/g, ' ')} →
+                                  </button>
+                                )}
                               </td>
                             </tr>
                           );

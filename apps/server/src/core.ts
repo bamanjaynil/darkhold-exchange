@@ -64,6 +64,41 @@ export type CoreEscrow = {
   pickupOtp?: string;
 };
 
+export type CoreDeal = {
+  id: string;
+  tradeId?: string;
+  listingId?: string;
+  symbol: string;
+  buyerUserId: string;
+  sellerUserId: string;
+  price: number;
+  qty: number;
+  amount: number;
+  status: string;
+  meetupDate?: string | null;
+  meetupTime?: string | null;
+  meetupLocation?: string | null;
+  meetupInstructions?: string | null;
+  buyerConfirmedMeetup: boolean;
+  sellerConfirmedMeetup: boolean;
+  meetupConfirmedAt?: number | null;
+  handedOverAt?: number | null;
+  completedAt?: number | null;
+  cancelledAt?: number | null;
+  cancelledByUserId?: string | null;
+  cancellationReason?: string | null;
+  cancellationCharge: number;
+  buyerRefundAmount: number;
+  sellerCompensationAmount: number;
+  disputeReason?: string | null;
+  disputedAt?: number | null;
+  resolvedAt?: number | null;
+  resolutionNotes?: string | null;
+  pickupOtp?: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type Command =
   | { type: 'ORDER_SUBMIT'; cmd: EngineOrderCommand; resolve: (val: any) => void; reject: (err: any) => void }
   | { type: 'ORDER_CANCEL'; orderId: string; symbol: string; userId: string; resolve: (val: any) => void; reject: (err: any) => void }
@@ -72,7 +107,14 @@ export type Command =
   | { type: 'AUCTION_CANCEL'; auctionId: string; userId: string; isAdmin: boolean; resolve: (val: any) => void; reject: (err: any) => void }
   | { type: 'ESCROW_DELIVER'; escrowId: string; sellerUserId: string; resolve: (val: any) => void; reject: (err: any) => void }
   | { type: 'ESCROW_SWEEP'; resolve: (val: any) => void; reject: (err: any) => void }
-  | { type: 'AUCTION_SWEEP'; resolve?: (val: any) => void; reject?: (err: any) => void };
+  | { type: 'AUCTION_SWEEP'; resolve?: (val: any) => void; reject?: (err: any) => void }
+  | { type: 'DEAL_PROPOSE_MEETUP'; dealId: string; userId: string; meetupDate: string; meetupTime: string; meetupLocation: string; meetupInstructions?: string; resolve: (val: any) => void; reject: (err: any) => void }
+  | { type: 'DEAL_CONFIRM_MEETUP'; dealId: string; userId: string; resolve: (val: any) => void; reject: (err: any) => void }
+  | { type: 'DEAL_HANDOVER'; dealId: string; userId: string; resolve: (val: any) => void; reject: (err: any) => void }
+  | { type: 'DEAL_CONFIRM_RECEIPT'; dealId: string; buyerUserId: string; resolve: (val: any) => void; reject: (err: any) => void }
+  | { type: 'DEAL_CANCEL'; dealId: string; userId: string; reason?: string; resolve: (val: any) => void; reject: (err: any) => void }
+  | { type: 'DEAL_DISPUTE'; dealId: string; userId: string; reason: string; resolve: (val: any) => void; reject: (err: any) => void }
+  | { type: 'DEAL_RESOLVE'; dealId: string; adminUserId: string; resolution: 'RELEASE_TO_SELLER' | 'REFUND_TO_BUYER'; notes?: string; resolve: (val: any) => void; reject: (err: any) => void };
 
 export class ExchangeCore {
   public readonly engine: MatchingEngine;
@@ -87,6 +129,7 @@ export class ExchangeCore {
   public readonly holdings: Map<string, UserHolding> = new Map(); // Key: `${userId}:${symbol}`
   public readonly auctions: Map<string, CoreAuction> = new Map();
   public readonly escrows: Map<string, CoreEscrow> = new Map();
+  public readonly deals: Map<string, CoreDeal> = new Map();
 
   public readonly cachedL2Snapshots: Map<string, { seq: number; data: any }> = new Map();
   public readonly cachedTrades: Map<string, Array<{ id: string; price: number; qty: number; is_simulated: boolean; created_at: string; buyerUserId?: string; sellerUserId?: string; buyerUsername?: string; sellerUsername?: string; side?: string }>> = new Map();
@@ -230,14 +273,14 @@ export class ExchangeCore {
 
   public notifyUserBalance(userId: string, seq: number): void {
     if (!this.wsUserNotifyCallback) return;
-    const bal = this.getBalance(userId);
+    const bal = this.getReconciledBalance(userId);
     this.wsUserNotifyCallback(userId, {
       balance: {
         available: bal.available,
         reserved: bal.reserved,
         escrow: bal.escrow,
         pendingWithdrawals: bal.pendingWithdrawals || 0,
-        total: bal.available + bal.reserved + bal.escrow,
+        total: bal.available + bal.reserved + bal.escrow + (bal.pendingWithdrawals || 0),
       },
     }, seq);
   }
@@ -337,9 +380,20 @@ export class ExchangeCore {
     }
 
     let computedEscrowCash = 0;
-    for (const esc of this.escrows.values()) {
-      if (esc.status === 'LOCKED' && esc.buyerUserId === userId) {
-        computedEscrowCash += esc.amount;
+    if (this.escrows.size > 0 || this.deals.size > 0) {
+      const countedTrades = (this.escrows.size > 0 && this.deals.size > 0) ? new Set<string>() : null;
+      for (const esc of this.escrows.values()) {
+        if (esc.status === 'LOCKED' && esc.buyerUserId === userId) {
+          computedEscrowCash += esc.amount;
+          if (countedTrades && esc.tradeId) countedTrades.add(esc.tradeId);
+        }
+      }
+      for (const deal of this.deals.values()) {
+        if (!['COMPLETED', 'CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED'].includes(deal.status) &&
+            deal.buyerUserId === userId &&
+            (!deal.tradeId || !countedTrades || !countedTrades.has(deal.tradeId))) {
+          computedEscrowCash += deal.amount;
+        }
       }
     }
 
@@ -368,9 +422,18 @@ export class ExchangeCore {
     }
 
     const escrowBySymbol: Record<string, number> = {};
+    const countedTradesHolding = new Set<string>();
     for (const esc of this.escrows.values()) {
       if (esc.status === 'LOCKED' && esc.sellerUserId === userId) {
         escrowBySymbol[esc.symbol] = (escrowBySymbol[esc.symbol] || 0) + esc.qty;
+        if (esc.tradeId) countedTradesHolding.add(esc.tradeId);
+      }
+    }
+    for (const deal of this.deals.values()) {
+      if (!['COMPLETED', 'CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED'].includes(deal.status) &&
+          deal.sellerUserId === userId &&
+          (!deal.tradeId || !countedTradesHolding.has(deal.tradeId))) {
+        escrowBySymbol[deal.symbol] = (escrowBySymbol[deal.symbol] || 0) + deal.qty;
       }
     }
 
@@ -698,11 +761,14 @@ export class ExchangeCore {
 
         // Process Matched Trades
         const upsertEscrows: CoreEscrow[] = [];
+        const upsertDeals: CoreDeal[] = [];
 
         for (const trade of result.trades) {
-          if (inst.escrowRequired) {
+          const isPhysicalOrEscrow = inst.escrowRequired || !inst.isBenchmark;
+          if (isPhysicalOrEscrow) {
             // Settle into Escrow Custody
             const escId = `esc_${currentSeq}_${trade.id}`;
+            const dealId = `deal_${currentSeq}_${trade.id}`;
             const tradeAmount = trade.price * trade.qty;
 
             const bBal = this.getBalance(trade.buyerUserId);
@@ -718,7 +784,7 @@ export class ExchangeCore {
               trade.symbol,
               tradeAmount,
               trade.qty,
-              escId,
+              dealId,
               currentSeq
             );
             journals.push(journal);
@@ -726,20 +792,54 @@ export class ExchangeCore {
             holdingDeltas.push(sellerHoldingDelta);
 
             const rawDigits = (Math.abs(currentSeq * 7919 + 849204) % 900000 + 100000).toString();
-            const escrowObj: CoreEscrow = {
-              id: escId,
+            if (inst.escrowRequired) {
+              const escrowObj: CoreEscrow = {
+                id: escId,
+                tradeId: trade.id,
+                symbol: trade.symbol,
+                buyerUserId: trade.buyerUserId,
+                sellerUserId: trade.sellerUserId,
+                qty: trade.qty,
+                amount: tradeAmount,
+                status: 'LOCKED',
+                expiresAt: this.clock.now() + 300_000, // 5 min timeout
+                pickupOtp: rawDigits,
+              };
+              this.escrows.set(escId, escrowObj);
+              upsertEscrows.push(escrowObj);
+            }
+
+            const dealObj: CoreDeal = {
+              id: dealId,
               tradeId: trade.id,
               symbol: trade.symbol,
               buyerUserId: trade.buyerUserId,
               sellerUserId: trade.sellerUserId,
+              price: trade.price,
               qty: trade.qty,
               amount: tradeAmount,
-              status: 'LOCKED',
-              expiresAt: this.clock.now() + 300_000, // 5 min timeout
+              status: 'MATCHED_PENDING_HANDOVER',
+              meetupDate: null,
+              meetupTime: null,
+              meetupLocation: 'Campus SAC Ground Floor',
+              meetupInstructions: null,
+              buyerConfirmedMeetup: false,
+              sellerConfirmedMeetup: false,
+              meetupConfirmedAt: null,
+              handedOverAt: null,
+              completedAt: null,
+              cancelledAt: null,
+              cancelledByUserId: null,
+              cancellationReason: null,
+              cancellationCharge: 0,
+              buyerRefundAmount: 0,
+              sellerCompensationAmount: 0,
               pickupOtp: rawDigits,
+              createdAt: this.clock.now(),
+              updatedAt: this.clock.now(),
             };
-            this.escrows.set(escId, escrowObj);
-            upsertEscrows.push(escrowObj);
+            this.deals.set(dealId, dealObj);
+            upsertDeals.push(dealObj);
           } else {
             // Settle Directly
             const bBal = this.getBalance(trade.buyerUserId);
@@ -892,6 +992,7 @@ export class ExchangeCore {
           newTrades: result.trades,
           upsertAuctions: [],
           upsertEscrows,
+          newDeals: upsertDeals,
           auditEvents: [],
           onCommit: () => {
             this.broadcastMarketUpdates(cmd.symbol, currentSeq, result.trades);
@@ -1344,6 +1445,16 @@ export class ExchangeCore {
 
         esc.status = 'RELEASED';
 
+        if (esc.tradeId) {
+          for (const d of this.deals.values()) {
+            if (d.tradeId === esc.tradeId) {
+              d.status = 'COMPLETED';
+              d.completedAt = this.clock.now();
+              d.updatedAt = this.clock.now();
+            }
+          }
+        }
+
         const {
           journal,
           buyerBalanceDelta,
@@ -1394,6 +1505,16 @@ export class ExchangeCore {
           if (esc.status === 'LOCKED' && now >= esc.expiresAt) {
             esc.status = 'REFUNDED';
             sweptCount++;
+
+            if (esc.tradeId) {
+              for (const d of this.deals.values()) {
+                if (d.tradeId === esc.tradeId) {
+                  d.status = 'REFUNDED';
+                  d.cancelledAt = this.clock.now();
+                  d.updatedAt = this.clock.now();
+                }
+              }
+            }
 
             // Refund cash to buyer, asset to seller
             const buyerBal = this.getBalance(esc.buyerUserId);
@@ -1506,6 +1627,482 @@ export class ExchangeCore {
         if (resolve) resolve({ success: true, expiredCount: expiredAuctions.length });
         break;
       }
+
+      case 'DEAL_PROPOSE_MEETUP': {
+        const { dealId, userId, meetupDate, meetupTime, meetupLocation, meetupInstructions } = item;
+        const deal = this.deals.get(dealId);
+        if (!deal) return resolve({ success: false, rejectedReason: 'DEAL_NOT_FOUND' });
+        if (deal.buyerUserId !== userId && deal.sellerUserId !== userId) {
+          return resolve({ success: false, rejectedReason: 'FORBIDDEN' });
+        }
+        if (['COMPLETED', 'CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED'].includes(deal.status)) {
+          return resolve({ success: false, rejectedReason: 'DEAL_ALREADY_FINALIZED' });
+        }
+
+        deal.meetupDate = meetupDate;
+        deal.meetupTime = meetupTime;
+        deal.meetupLocation = meetupLocation;
+        deal.meetupInstructions = meetupInstructions || null;
+        deal.updatedAt = this.clock.now();
+
+        if (userId === deal.buyerUserId) {
+          deal.buyerConfirmedMeetup = true;
+          deal.sellerConfirmedMeetup = false;
+        } else {
+          deal.sellerConfirmedMeetup = true;
+          deal.buyerConfirmedMeetup = false;
+        }
+        deal.status = 'AWAITING_MEETUP_CONFIRMATION';
+
+        this.persistence['pool'].query(
+          `UPDATE deals
+           SET meetup_date = $1, meetup_time = $2, meetup_location = $3, meetup_instructions = $4,
+               buyer_confirmed_meetup = $5, seller_confirmed_meetup = $6, status = $7, updated_at = NOW()
+           WHERE id = $8`,
+          [deal.meetupDate, deal.meetupTime, deal.meetupLocation, deal.meetupInstructions, deal.buyerConfirmedMeetup, deal.sellerConfirmedMeetup, deal.status, deal.id]
+        ).catch((err: any) => console.error('[CORE] Failed to update deal meetup:', err.message));
+
+        return resolve({ success: true, deal });
+      }
+
+      case 'DEAL_CONFIRM_MEETUP': {
+        const { dealId, userId } = item;
+        const deal = this.deals.get(dealId);
+        if (!deal) return resolve({ success: false, rejectedReason: 'DEAL_NOT_FOUND' });
+        if (deal.buyerUserId !== userId && deal.sellerUserId !== userId) {
+          return resolve({ success: false, rejectedReason: 'FORBIDDEN' });
+        }
+        if (['COMPLETED', 'CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED'].includes(deal.status)) {
+          return resolve({ success: false, rejectedReason: 'DEAL_ALREADY_FINALIZED' });
+        }
+
+        if (userId === deal.buyerUserId) {
+          deal.buyerConfirmedMeetup = true;
+        }
+        if (userId === deal.sellerUserId) {
+          deal.sellerConfirmedMeetup = true;
+        }
+
+        if (deal.buyerConfirmedMeetup && deal.sellerConfirmedMeetup) {
+          deal.status = 'MEETUP_SCHEDULED';
+          deal.meetupConfirmedAt = this.clock.now();
+        }
+        deal.updatedAt = this.clock.now();
+
+        this.persistence['pool'].query(
+          `UPDATE deals
+           SET buyer_confirmed_meetup = $1, seller_confirmed_meetup = $2, status = $3,
+               meetup_confirmed_at = $4, updated_at = NOW()
+           WHERE id = $5`,
+          [
+            deal.buyerConfirmedMeetup,
+            deal.sellerConfirmedMeetup,
+            deal.status,
+            deal.meetupConfirmedAt ? new Date(deal.meetupConfirmedAt) : null,
+            deal.id
+          ]
+        ).catch((err: any) => console.error('[CORE] Failed to confirm meetup:', err.message));
+
+        return resolve({ success: true, deal });
+      }
+
+      case 'DEAL_HANDOVER': {
+        const { dealId, userId } = item;
+        const deal = this.deals.get(dealId);
+        if (!deal) return resolve({ success: false, rejectedReason: 'DEAL_NOT_FOUND' });
+        if (deal.sellerUserId !== userId) {
+          return resolve({ success: false, rejectedReason: 'FORBIDDEN' });
+        }
+        if (['COMPLETED', 'CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED'].includes(deal.status)) {
+          return resolve({ success: false, rejectedReason: 'DEAL_ALREADY_FINALIZED' });
+        }
+
+        deal.status = 'AWAITING_BUYER_CONFIRMATION';
+        deal.handedOverAt = this.clock.now();
+        deal.updatedAt = this.clock.now();
+
+        this.persistence['pool'].query(
+          `UPDATE deals SET status = $1, handed_over_at = NOW(), updated_at = NOW() WHERE id = $2`,
+          [deal.status, deal.id]
+        ).catch((err: any) => console.error('[CORE] Failed to record handover:', err.message));
+
+        return resolve({ success: true, deal });
+      }
+
+      case 'DEAL_CONFIRM_RECEIPT': {
+        const { dealId, buyerUserId } = item;
+        const deal = this.deals.get(dealId);
+        if (!deal) return resolve({ success: false, rejectedReason: 'DEAL_NOT_FOUND' });
+        if (deal.buyerUserId !== buyerUserId) {
+          return resolve({ success: false, rejectedReason: 'FORBIDDEN' });
+        }
+        if (deal.status === 'COMPLETED') {
+          return resolve({ success: true, deal, alreadyCompleted: true });
+        }
+        if (['CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED'].includes(deal.status)) {
+          return resolve({ success: false, rejectedReason: 'DEAL_CANCELLED' });
+        }
+
+        // Release Escrow funds to seller, asset to buyer
+        const buyerBal = this.getBalance(deal.buyerUserId);
+        buyerBal.escrow = Math.max(0, buyerBal.escrow - deal.amount);
+        const sellerBal = this.getBalance(deal.sellerUserId);
+        sellerBal.available += deal.amount;
+
+        const sellerHold = this.getHolding(deal.sellerUserId, deal.symbol);
+        sellerHold.escrow = Math.max(0, sellerHold.escrow - deal.qty);
+        const buyerHold = this.getHolding(deal.buyerUserId, deal.symbol);
+        buyerHold.available += deal.qty;
+
+        deal.status = 'COMPLETED';
+        deal.completedAt = this.clock.now();
+        deal.updatedAt = this.clock.now();
+
+        if (deal.tradeId) {
+          for (const esc of this.escrows.values()) {
+            if (esc.tradeId === deal.tradeId) {
+              esc.status = 'RELEASED';
+            }
+          }
+        }
+
+        const {
+          journal,
+          buyerBalanceDelta,
+          sellerBalanceDelta,
+          buyerHoldingDelta,
+          sellerHoldingDelta,
+        } = this.ledger.releaseEscrow(
+          deal.buyerUserId,
+          deal.sellerUserId,
+          deal.symbol,
+          deal.amount,
+          deal.qty,
+          deal.id,
+          currentSeq
+        );
+
+        const deltaBatch: StateDeltaBatch = {
+          commandId: `deal_complete_${deal.id}_${currentSeq}`,
+          seq: currentSeq,
+          journals: [journal],
+          balanceDeltas: [buyerBalanceDelta, sellerBalanceDelta],
+          holdingDeltas: [buyerHoldingDelta, sellerHoldingDelta],
+          upsertOrders: [],
+          newTrades: [],
+          upsertAuctions: [],
+          upsertEscrows: [],
+          newDeals: [deal],
+          auditEvents: [],
+          onCommit: () => {
+            this.notifyUserBalance(deal.buyerUserId, currentSeq);
+            this.notifyUserBalance(deal.sellerUserId, currentSeq);
+          },
+          onRollback: (err) => console.error('[CORE] Deal completion persistence error:', err.message),
+        };
+
+        if (this.isSyncAck()) {
+          deltaBatch.onCommit = () => {
+            this.notifyUserBalance(deal.buyerUserId, currentSeq);
+            this.notifyUserBalance(deal.sellerUserId, currentSeq);
+            resolve({ success: true, deal });
+          };
+          deltaBatch.onRollback = (err) => reject(err);
+        }
+
+        this.persistence.enqueue(deltaBatch);
+
+        this.persistence['pool'].query(
+          `UPDATE deals
+           SET status = 'COMPLETED', completed_at = NOW(), updated_at = NOW()
+           WHERE id = $1`,
+          [deal.id]
+        ).catch((err: any) => console.error('[CORE] Failed to complete deal:', err.message));
+
+        if (!this.isSyncAck()) resolve({ success: true, deal });
+        break;
+      }
+
+      case 'DEAL_CANCEL': {
+        const { dealId, userId, reason } = item;
+        const deal = this.deals.get(dealId);
+        if (!deal) return resolve({ success: false, rejectedReason: 'DEAL_NOT_FOUND' });
+        if (deal.buyerUserId !== userId && deal.sellerUserId !== userId) {
+          return resolve({ success: false, rejectedReason: 'FORBIDDEN' });
+        }
+        if (['COMPLETED', 'CANCELLED_BY_BUYER', 'CANCELLED_BY_SELLER', 'REFUNDED'].includes(deal.status)) {
+          return resolve({ success: false, rejectedReason: 'DEAL_ALREADY_FINALIZED' });
+        }
+
+        const isBuyer = (userId === deal.buyerUserId);
+        const meetupWasConfirmed = !!deal.meetupConfirmedAt ||
+          deal.status === 'MEETUP_SCHEDULED' ||
+          deal.status === 'AWAITING_ITEM_HANDOVER' ||
+          deal.status === 'AWAITING_BUYER_CONFIRMATION';
+
+        let journal: JournalDelta;
+        const balanceDeltas: BalanceDelta[] = [];
+        const holdingDeltas: HoldingDelta[] = [];
+
+        if (isBuyer && meetupWasConfirmed) {
+          // 1% cancellation fee applied to buyer, transferred to seller
+          const penalty = Math.floor((deal.amount * 1) / 100);
+          const refund = deal.amount - penalty;
+          const comp = penalty;
+
+          const buyerBal = this.getBalance(deal.buyerUserId);
+          buyerBal.escrow = Math.max(0, buyerBal.escrow - deal.amount);
+          buyerBal.available += refund;
+
+          const sellerBal = this.getBalance(deal.sellerUserId);
+          sellerBal.available += comp;
+
+          const sellerHold = this.getHolding(deal.sellerUserId, deal.symbol);
+          sellerHold.escrow = Math.max(0, sellerHold.escrow - deal.qty);
+          sellerHold.available += deal.qty;
+
+          const res = this.ledger.cancelDealWithPenalty(
+            deal.buyerUserId,
+            deal.sellerUserId,
+            deal.symbol,
+            deal.amount,
+            refund,
+            comp,
+            deal.qty,
+            deal.id,
+            currentSeq
+          );
+          journal = res.journal;
+          balanceDeltas.push(res.buyerBalanceDelta, res.sellerBalanceDelta);
+          holdingDeltas.push(res.sellerHoldingDelta);
+
+          deal.status = 'CANCELLED_BY_BUYER';
+          deal.cancelledAt = this.clock.now();
+          deal.cancelledByUserId = userId;
+          deal.cancellationCharge = penalty;
+          deal.buyerRefundAmount = refund;
+          deal.sellerCompensationAmount = comp;
+          deal.cancellationReason = reason || 'Cancelled by buyer after meetup was confirmed';
+          deal.updatedAt = this.clock.now();
+        } else {
+          // 100% refund to buyer, item returned to seller, 0 penalty
+          const buyerBal = this.getBalance(deal.buyerUserId);
+          buyerBal.escrow = Math.max(0, buyerBal.escrow - deal.amount);
+          buyerBal.available += deal.amount;
+
+          const sellerHold = this.getHolding(deal.sellerUserId, deal.symbol);
+          sellerHold.escrow = Math.max(0, sellerHold.escrow - deal.qty);
+          sellerHold.available += deal.qty;
+
+          const res = this.ledger.refundEscrow(
+            deal.buyerUserId,
+            deal.sellerUserId,
+            deal.symbol,
+            deal.amount,
+            deal.qty,
+            deal.id,
+            currentSeq
+          );
+          journal = res.journal;
+          balanceDeltas.push(res.buyerBalanceDelta);
+          holdingDeltas.push(res.sellerHoldingDelta);
+
+          deal.status = isBuyer ? 'CANCELLED_BY_BUYER' : 'CANCELLED_BY_SELLER';
+          deal.cancelledAt = this.clock.now();
+          deal.cancelledByUserId = userId;
+          deal.cancellationCharge = 0;
+          deal.buyerRefundAmount = deal.amount;
+          deal.sellerCompensationAmount = 0;
+          deal.cancellationReason = reason || (isBuyer ? 'Cancelled by buyer before meetup confirmed' : 'Cancelled by seller');
+          deal.updatedAt = this.clock.now();
+        }
+
+        if (deal.tradeId) {
+          for (const esc of this.escrows.values()) {
+            if (esc.tradeId === deal.tradeId) {
+              esc.status = 'REFUNDED';
+            }
+          }
+        }
+
+        const deltaBatch: StateDeltaBatch = {
+          commandId: `deal_cxl_${deal.id}_${currentSeq}`,
+          seq: currentSeq,
+          journals: [journal],
+          balanceDeltas,
+          holdingDeltas,
+          upsertOrders: [],
+          newTrades: [],
+          upsertAuctions: [],
+          upsertEscrows: [],
+          newDeals: [deal],
+          auditEvents: [],
+          onCommit: () => {
+            this.notifyUserBalance(deal.buyerUserId, currentSeq);
+            this.notifyUserBalance(deal.sellerUserId, currentSeq);
+          },
+          onRollback: (err) => console.error('[CORE] Deal cancel persistence error:', err.message),
+        };
+
+        if (this.isSyncAck()) {
+          deltaBatch.onCommit = () => {
+            this.notifyUserBalance(deal.buyerUserId, currentSeq);
+            this.notifyUserBalance(deal.sellerUserId, currentSeq);
+            resolve({ success: true, deal });
+          };
+          deltaBatch.onRollback = (err) => reject(err);
+        }
+
+        this.persistence.enqueue(deltaBatch);
+
+        this.persistence['pool'].query(
+          `UPDATE deals
+           SET status = $1, cancelled_at = NOW(), cancelled_by_user_id = $2,
+               cancellation_charge = $3, buyer_refund_amount = $4, seller_compensation_amount = $5,
+               cancellation_reason = $6, updated_at = NOW()
+           WHERE id = $7`,
+          [
+            deal.status,
+            deal.cancelledByUserId,
+            deal.cancellationCharge,
+            deal.buyerRefundAmount,
+            deal.sellerCompensationAmount,
+            deal.cancellationReason,
+            deal.id
+          ]
+        ).catch((err: any) => console.error('[CORE] Failed to cancel deal in DB:', err.message));
+
+        if (!this.isSyncAck()) resolve({ success: true, deal });
+        break;
+      }
+
+      case 'DEAL_DISPUTE': {
+        const { dealId, userId, reason } = item;
+        const deal = this.deals.get(dealId);
+        if (!deal) return resolve({ success: false, rejectedReason: 'DEAL_NOT_FOUND' });
+        if (deal.buyerUserId !== userId && deal.sellerUserId !== userId) {
+          return resolve({ success: false, rejectedReason: 'FORBIDDEN' });
+        }
+
+        deal.status = 'DISPUTED';
+        deal.disputedAt = this.clock.now();
+        deal.disputeReason = reason;
+        deal.updatedAt = this.clock.now();
+
+        this.persistence['pool'].query(
+          `UPDATE deals SET status = 'DISPUTED', disputed_at = NOW(), dispute_reason = $1, updated_at = NOW() WHERE id = $2`,
+          [reason, deal.id]
+        ).catch((err: any) => console.error('[CORE] Failed to dispute deal:', err.message));
+
+        return resolve({ success: true, deal });
+      }
+
+      case 'DEAL_RESOLVE': {
+        const { dealId, adminUserId, resolution, notes } = item;
+        const deal = this.deals.get(dealId);
+        if (!deal) return resolve({ success: false, rejectedReason: 'DEAL_NOT_FOUND' });
+
+        if (resolution === 'RELEASE_TO_SELLER') {
+          const buyerBal = this.getBalance(deal.buyerUserId);
+          buyerBal.escrow = Math.max(0, buyerBal.escrow - deal.amount);
+          const sellerBal = this.getBalance(deal.sellerUserId);
+          sellerBal.available += deal.amount;
+
+          const sellerHold = this.getHolding(deal.sellerUserId, deal.symbol);
+          sellerHold.escrow = Math.max(0, sellerHold.escrow - deal.qty);
+          const buyerHold = this.getHolding(deal.buyerUserId, deal.symbol);
+          buyerHold.available += deal.qty;
+
+          deal.status = 'COMPLETED';
+          deal.completedAt = this.clock.now();
+          deal.resolvedAt = this.clock.now();
+          deal.resolutionNotes = notes || 'Admin resolved dispute in favor of seller';
+          deal.updatedAt = this.clock.now();
+
+          if (deal.tradeId) {
+            for (const esc of this.escrows.values()) {
+              if (esc.tradeId === deal.tradeId) {
+                esc.status = 'RELEASED';
+              }
+            }
+          }
+
+          const { journal, buyerBalanceDelta, sellerBalanceDelta, buyerHoldingDelta, sellerHoldingDelta } =
+            this.ledger.releaseEscrow(deal.buyerUserId, deal.sellerUserId, deal.symbol, deal.amount, deal.qty, deal.id, currentSeq);
+
+          this.persistence.enqueue({
+            commandId: `deal_resolve_${deal.id}`,
+            seq: currentSeq,
+            journals: [journal],
+            balanceDeltas: [buyerBalanceDelta, sellerBalanceDelta],
+            holdingDeltas: [buyerHoldingDelta, sellerHoldingDelta],
+            upsertOrders: [],
+            newTrades: [],
+            upsertAuctions: [],
+            upsertEscrows: [],
+            newDeals: [deal],
+            auditEvents: [],
+            onCommit: () => {
+              this.notifyUserBalance(deal.buyerUserId, currentSeq);
+              this.notifyUserBalance(deal.sellerUserId, currentSeq);
+            },
+            onRollback: (err) => console.error(err),
+          });
+        } else {
+          // Refund to buyer
+          const buyerBal = this.getBalance(deal.buyerUserId);
+          buyerBal.escrow = Math.max(0, buyerBal.escrow - deal.amount);
+          buyerBal.available += deal.amount;
+
+          const sellerHold = this.getHolding(deal.sellerUserId, deal.symbol);
+          sellerHold.escrow = Math.max(0, sellerHold.escrow - deal.qty);
+          sellerHold.available += deal.qty;
+
+          deal.status = 'REFUNDED';
+          deal.cancelledAt = this.clock.now();
+          deal.resolvedAt = this.clock.now();
+          deal.resolutionNotes = notes || 'Admin resolved dispute in favor of buyer';
+          deal.buyerRefundAmount = deal.amount;
+          deal.updatedAt = this.clock.now();
+
+          if (deal.tradeId) {
+            for (const esc of this.escrows.values()) {
+              if (esc.tradeId === deal.tradeId) {
+                esc.status = 'REFUNDED';
+              }
+            }
+          }
+
+          const { journal, buyerBalanceDelta, sellerHoldingDelta } =
+            this.ledger.refundEscrow(deal.buyerUserId, deal.sellerUserId, deal.symbol, deal.amount, deal.qty, deal.id, currentSeq);
+
+          this.persistence.enqueue({
+            commandId: `deal_resolve_${deal.id}`,
+            seq: currentSeq,
+            journals: [journal],
+            balanceDeltas: [buyerBalanceDelta],
+            holdingDeltas: [sellerHoldingDelta],
+            upsertOrders: [],
+            newTrades: [],
+            upsertAuctions: [],
+            upsertEscrows: [],
+            newDeals: [deal],
+            auditEvents: [],
+            onCommit: () => {
+              this.notifyUserBalance(deal.buyerUserId, currentSeq);
+              this.notifyUserBalance(deal.sellerUserId, currentSeq);
+            },
+            onRollback: (err) => console.error(err),
+          });
+        }
+
+        this.persistence['pool'].query(
+          `UPDATE deals SET status = $1, resolved_at = NOW(), resolution_notes = $2, updated_at = NOW() WHERE id = $3`,
+          [deal.status, deal.resolutionNotes, deal.id]
+        ).catch((err: any) => console.error('[CORE] Failed to resolve deal:', err.message));
+
+        return resolve({ success: true, deal });
+      }
     }
   }
 
@@ -1523,16 +2120,18 @@ export class ExchangeCore {
       const nowStr = new Date().toISOString();
       for (let i = 0; i < trades.length; i++) {
         const t = trades[i]!;
-        list.unshift({
-          id: t.id,
-          price: t.price,
-          qty: t.qty,
-          buyerUserId: t.buyerUserId,
-          sellerUserId: t.sellerUserId,
-          side: t.takerSide,
-          is_simulated: false,
-          created_at: nowStr,
-        });
+        if (!list.some((existing) => existing.id === t.id)) {
+          list.unshift({
+            id: t.id,
+            price: t.price,
+            qty: t.qty,
+            buyerUserId: t.buyerUserId,
+            sellerUserId: t.sellerUserId,
+            side: t.takerSide,
+            is_simulated: false,
+            created_at: nowStr,
+          });
+        }
       }
       if (list.length > 50) list.length = 50;
     }

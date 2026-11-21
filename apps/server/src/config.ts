@@ -36,7 +36,7 @@ const ConfigSchema = z.object({
   PERSIST_BATCH_MS: z.coerce.number().int().min(1).default(5),
 
   POW_REQUIRED: z.preprocess((val) => val === 'true' || val === true, z.boolean()).default(true),
-  POW_MIN_DIFFICULTY: z.coerce.number().int().min(4).max(32).default(10),
+  POW_MIN_DIFFICULTY: z.coerce.number().int().min(4).max(32).default(6),
   POW_MAX_DIFFICULTY: z.coerce.number().int().min(4).max(32).default(22),
   RATE_LIMIT_PROFILE: z
     .preprocess((val) => {

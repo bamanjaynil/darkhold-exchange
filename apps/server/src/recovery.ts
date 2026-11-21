@@ -5,12 +5,13 @@
  */
 
 import pg from 'pg';
-import { ExchangeCore, CoreAuction, CoreEscrow } from './core.js';
+import { ExchangeCore, CoreAuction, CoreEscrow, CoreDeal } from './core.js';
 import { InstrumentConfig, EngineOrderCommand } from '@darkhold/engine';
 import { PersistenceEngine } from './persistence.js';
 import { Clock } from './clock.js';
 import { runReconciliation } from './reconciliation.js';
 import { acquireWriterLock } from './db.js';
+import { OFFICIAL_ARTWORKS } from './artworks.js';
 
 export async function bootstrapCore(
   pool: pg.Pool,
@@ -31,8 +32,13 @@ export async function bootstrapCore(
   let core: ExchangeCore;
 
   try {
-    // Ensure image_url column exists
+    // Ensure image_url column exists on instruments and fulfillment columns on community_listings
     await client.query('ALTER TABLE instruments ADD COLUMN IF NOT EXISTS image_url TEXT;').catch(() => {});
+    await client.query(`
+      ALTER TABLE community_listings ADD COLUMN IF NOT EXISTS buyer_user_id VARCHAR(64);
+      ALTER TABLE community_listings ADD COLUMN IF NOT EXISTS pickup_otp VARCHAR(32);
+      ALTER TABLE community_listings ADD COLUMN IF NOT EXISTS sold_at TIMESTAMPTZ;
+    `).catch(() => {});
 
     // 2. Load Instruments
     const { rows: instRows } = await client.query<{
@@ -60,7 +66,7 @@ export async function bootstrapCore(
       maxQtyPerOrder: r.max_qty_per_order,
       escrowRequired: r.escrow_required,
       isBenchmark: r.is_benchmark,
-      imageUrl: r.image_url || undefined,
+      imageUrl: r.image_url || (OFFICIAL_ARTWORKS as any)[r.symbol] || undefined,
     }));
 
     const persistence = new PersistenceEngine(pool, batchMax, batchMs);
@@ -132,10 +138,10 @@ export async function selfHealLedger(client: pg.PoolClient): Promise<void> {
       userCashMap.set(r.user_id, b);
     }
     const amt = Number(r.total);
-    if (r.kind === 'USER_AVAILABLE') b.available = amt;
-    else if (r.kind === 'USER_RESERVED') b.reserved = amt;
-    else if (r.kind === 'ESCROW') b.escrow = amt;
-    else if (r.kind === 'PENDING_WITHDRAWAL') b.pendingWithdrawals = amt;
+    if (r.kind === 'USER_AVAILABLE') b.available = Math.max(0, amt);
+    else if (r.kind === 'USER_RESERVED') b.reserved = Math.max(0, amt);
+    else if (r.kind === 'ESCROW') b.escrow = Math.max(0, amt);
+    else if (r.kind === 'PENDING_WITHDRAWAL') b.pendingWithdrawals = Math.max(0, amt);
   }
 
   for (const [userId, bal] of userCashMap.entries()) {
@@ -148,7 +154,13 @@ export async function selfHealLedger(client: pg.PoolClient): Promise<void> {
         escrow = EXCLUDED.escrow,
         pending_withdrawals = EXCLUDED.pending_withdrawals,
         updated_at = NOW()
-    `, [userId, bal.available, bal.reserved, bal.escrow, bal.pendingWithdrawals || 0]);
+    `, [
+      userId,
+      Math.max(0, bal.available),
+      Math.max(0, bal.reserved),
+      Math.max(0, bal.escrow),
+      Math.max(0, bal.pendingWithdrawals || 0)
+    ]);
   }
 
   // 3. Re-materialize holdings from SUM(postings) for all user instrument holdings
@@ -175,9 +187,9 @@ export async function selfHealLedger(client: pg.PoolClient): Promise<void> {
       userHoldingMap.set(key, h);
     }
     const amt = Number(r.total);
-    if (r.kind === 'USER_AVAILABLE') h.available = amt;
-    else if (r.kind === 'USER_RESERVED') h.reserved = amt;
-    else if (r.kind === 'ESCROW') h.escrow = amt;
+    if (r.kind === 'USER_AVAILABLE') h.available = Math.max(0, amt);
+    else if (r.kind === 'USER_RESERVED') h.reserved = Math.max(0, amt);
+    else if (r.kind === 'ESCROW') h.escrow = Math.max(0, amt);
   }
 
   for (const [key, hold] of userHoldingMap.entries()) {
@@ -190,7 +202,13 @@ export async function selfHealLedger(client: pg.PoolClient): Promise<void> {
         reserved = EXCLUDED.reserved,
         escrow = EXCLUDED.escrow,
         updated_at = NOW()
-    `, [userId, instId, hold.available, hold.reserved, hold.escrow]);
+    `, [
+      userId,
+      instId,
+      Math.max(0, hold.available),
+      Math.max(0, hold.reserved),
+      Math.max(0, hold.escrow)
+    ]);
   }
 }
 
@@ -200,6 +218,7 @@ export async function hydrateFromDb(core: ExchangeCore, client: pg.PoolClient): 
   core.holdings.clear();
   core.auctions.clear();
   core.escrows.clear();
+  core.deals.clear();
   core.persistence.persistedOrderIds.clear();
 
   // Load Max Seq
@@ -365,5 +384,81 @@ export async function hydrateFromDb(core: ExchangeCore, client: pg.PoolClient): 
       expiresAt: e.expires_at.getTime(),
     };
     core.escrows.set(e.id, esc);
+  }
+
+  // Load Deals
+  const { rows: dealRows } = await client.query<{
+    id: string;
+    trade_id?: string;
+    listing_id?: string;
+    symbol: string;
+    buyer_user_id: string;
+    seller_user_id: string;
+    price: string;
+    qty: number;
+    amount: string;
+    status: string;
+    meetup_date?: string | null;
+    meetup_time?: string | null;
+    meetup_location?: string | null;
+    meetup_instructions?: string | null;
+    buyer_confirmed_meetup: boolean;
+    seller_confirmed_meetup: boolean;
+    meetup_confirmed_at?: Date | null;
+    handed_over_at?: Date | null;
+    completed_at?: Date | null;
+    cancelled_at?: Date | null;
+    cancelled_by_user_id?: string | null;
+    cancellation_reason?: string | null;
+    cancellation_charge: string;
+    buyer_refund_amount: string;
+    seller_compensation_amount: string;
+    dispute_reason?: string | null;
+    disputed_at?: Date | null;
+    resolved_at?: Date | null;
+    resolution_notes?: string | null;
+    pickup_otp?: string | null;
+    created_at: Date;
+    updated_at: Date;
+  }>(`
+    SELECT * FROM deals ORDER BY created_at DESC LIMIT 500
+  `);
+
+  for (const d of dealRows) {
+    const deal: CoreDeal = {
+      id: d.id,
+      tradeId: d.trade_id,
+      listingId: d.listing_id,
+      symbol: d.symbol,
+      buyerUserId: d.buyer_user_id,
+      sellerUserId: d.seller_user_id,
+      price: Number(d.price),
+      qty: d.qty,
+      amount: Number(d.amount),
+      status: d.status,
+      meetupDate: d.meetup_date,
+      meetupTime: d.meetup_time,
+      meetupLocation: d.meetup_location,
+      meetupInstructions: d.meetup_instructions,
+      buyerConfirmedMeetup: d.buyer_confirmed_meetup,
+      sellerConfirmedMeetup: d.seller_confirmed_meetup,
+      meetupConfirmedAt: d.meetup_confirmed_at ? d.meetup_confirmed_at.getTime() : null,
+      handedOverAt: d.handed_over_at ? d.handed_over_at.getTime() : null,
+      completedAt: d.completed_at ? d.completed_at.getTime() : null,
+      cancelledAt: d.cancelled_at ? d.cancelled_at.getTime() : null,
+      cancelledByUserId: d.cancelled_by_user_id,
+      cancellationReason: d.cancellation_reason,
+      cancellationCharge: Number(d.cancellation_charge || 0),
+      buyerRefundAmount: Number(d.buyer_refund_amount || 0),
+      sellerCompensationAmount: Number(d.seller_compensation_amount || 0),
+      disputeReason: d.dispute_reason,
+      disputedAt: d.disputed_at ? d.disputed_at.getTime() : null,
+      resolvedAt: d.resolved_at ? d.resolved_at.getTime() : null,
+      resolutionNotes: d.resolution_notes,
+      pickupOtp: d.pickup_otp,
+      createdAt: d.created_at.getTime(),
+      updatedAt: d.updated_at.getTime(),
+    };
+    core.deals.set(d.id, deal);
   }
 }

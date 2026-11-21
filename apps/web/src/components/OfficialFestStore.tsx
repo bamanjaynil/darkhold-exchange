@@ -703,7 +703,21 @@ export const OfficialFestStore: React.FC<OfficialFestStoreProps> = ({
               const canAfford = availableDKC >= priceWhole;
               const isBuying = buyingId === prod.id;
               const hasStock = activeVar && activeVar.stock > 0;
-              const imageUrl = Array.isArray(prod.images) && prod.images.length > 0 ? prod.images[0] : null;
+              let imageUrl: string | null = null;
+              if (Array.isArray(prod.images) && prod.images.length > 0) {
+                imageUrl = typeof prod.images[0] === 'string' ? prod.images[0] : null;
+              } else if (typeof prod.images === 'string' && prod.images.trim().startsWith('[')) {
+                try {
+                  const parsed = JSON.parse(prod.images);
+                  if (Array.isArray(parsed) && parsed.length > 0) imageUrl = parsed[0];
+                } catch {}
+              } else if (typeof prod.images === 'string' && prod.images.trim().length > 0) {
+                imageUrl = prod.images.trim();
+              } else if ((prod as any).imageUrl) {
+                imageUrl = (prod as any).imageUrl;
+              } else if ((prod as any).image_url) {
+                imageUrl = (prod as any).image_url;
+              }
 
               return (
                 <div
@@ -733,7 +747,22 @@ export const OfficialFestStore: React.FC<OfficialFestStoreProps> = ({
                     }}
                   >
                     {imageUrl ? (
-                      <img src={imageUrl} alt={prod.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      <img
+                        src={imageUrl}
+                        alt={prod.name}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        onError={(e) => {
+                          (e.currentTarget as HTMLElement).style.display = 'none';
+                          const p = e.currentTarget.parentElement;
+                          if (p && !p.querySelector('.fallback-placeholder')) {
+                            const fb = document.createElement('div');
+                            fb.className = 'fallback-placeholder';
+                            fb.style.fontSize = '64px';
+                            fb.innerText = '👕';
+                            p.appendChild(fb);
+                          }
+                        }}
+                      />
                     ) : (
                       <div style={{ fontSize: 64 }}>👕</div>
                     )}

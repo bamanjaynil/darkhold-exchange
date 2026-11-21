@@ -1,23 +1,23 @@
 ================================================================================
                  DARKHOLD EXCHANGE — LOCUST LOAD BENCHMARK REPORT               
 ================================================================================
-Timestamp:           2026-10-28T19:27:06.021856+00:00
+Timestamp:           2026-11-01T05:32:34.006261+00:00
 Target Host:         http://localhost:3000
-Total Requests:      38716
+Total Requests:      16709
 Total Failures:      0 (0.0%)
-Average RPS:         2617.59 req/sec
+Average RPS:         1131.95 req/sec
 --------------------------------------------------------------------------------
 RESPONSE TIME LATENCIES (ms):
-  Min:               0.86 ms
-  Median (p50):      12 ms
-  p95:               24 ms
-  p99:               42 ms
-  Max:               364.77 ms
-  Avg:               13.34 ms
+  Min:               1.36 ms
+  Median (p50):      32 ms
+  p95:               89 ms
+  p99:               130 ms
+  Max:               723.33 ms
+  Avg:               36.6 ms
 --------------------------------------------------------------------------------
 REQUEST BREAKDOWN BY ENDPOINT:
-  POST /api/auth/login                |     50 reqs | 0.0% fail | avg: 200.6ms | p50:   200ms | p95:   360ms
-  POST POST /api/orders [BENCH-X]     |  29693 reqs | 0.0% fail | avg:  13.1ms | p50:    12ms | p95:    24ms
-  GET GET /api/book/[symbol]         |   5994 reqs | 0.0% fail | avg:  12.9ms | p50:    12ms | p95:    24ms
-  GET GET /api/trades/[symbol]       |   2979 reqs | 0.0% fail | avg:  13.0ms | p50:    12ms | p95:    24ms
+  POST /api/auth/login                |     50 reqs | 0.0% fail | avg: 212.9ms | p50:   200ms | p95:   370ms
+  POST POST /api/orders [BENCH-X]     |  12811 reqs | 0.0% fail | avg:  31.9ms | p50:    31ms | p95:    68ms
+  GET GET /api/book/[symbol]         |   2662 reqs | 0.0% fail | avg:  31.3ms | p50:    30ms | p95:    67ms
+  GET GET /api/trades/[symbol]       |   1186 reqs | 0.0% fail | avg:  92.0ms | p50:    94ms | p95:   150ms
 ================================================================================

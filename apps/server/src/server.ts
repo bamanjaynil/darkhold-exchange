@@ -4,7 +4,7 @@
  * Fastify HTTP & WebSocket server bootstrapping with single-writer advisory lock.
  */
 
-import Fastify from 'fastify';
+import Fastify, { LogController } from 'fastify';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
@@ -27,7 +27,21 @@ export async function buildServer(customPool?: pg.Pool) {
 
   const server = Fastify({
     logger: isBench ? false : config.NODE_ENV !== 'test',
+    logController: new LogController({
+      disableRequestLogging: true,
+    }),
     bodyLimit: 15 * 1024 * 1024, // 15MB limit for large payloads / base64 image uploads
+  });
+
+  // Support empty JSON bodies gracefully without throwing FST_ERR_CTP_EMPTY_JSON_BODY
+  server.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, defaultDone) => {
+    try {
+      const json = (typeof body === 'string' && body.trim().length > 0) ? JSON.parse(body) : {};
+      defaultDone(null, json);
+    } catch (err: any) {
+      err.statusCode = 400;
+      defaultDone(err, undefined);
+    }
   });
 
   await server.register(cookie, {

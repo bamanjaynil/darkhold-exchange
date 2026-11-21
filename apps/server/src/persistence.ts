@@ -21,6 +21,7 @@ export type StateDeltaBatch = {
   newTrades: MatchedTrade[];
   upsertAuctions: any[];
   upsertEscrows: any[];
+  newDeals?: any[];
   auditEvents: Array<{
     eventType: string;
     reason: string;
@@ -439,7 +440,7 @@ export class PersistenceEngine {
       this.maxQueueDepth = this.queue.length;
     }
 
-    if (this.queue.length >= 15 || this.queue.length >= this.batchMax) {
+    if (this.queue.length >= this.batchMax) {
       if (this.timer) {
         clearTimeout(this.timer);
         this.timer = null;
@@ -1208,6 +1209,33 @@ export class PersistenceEngine {
           );
           this.queryCountEscrows++;
           this.totalEscrowsUpsertedCount++;
+        }
+
+        if (batch.newDeals && batch.newDeals.length > 0) {
+          for (const d of batch.newDeals) {
+            await client.query(
+              `INSERT INTO deals (
+                 id, trade_id, symbol, buyer_user_id, seller_user_id, price, qty, amount,
+                 status, meetup_location, pickup_otp, created_at, updated_at
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+               ON CONFLICT (id) DO UPDATE SET
+                 status = EXCLUDED.status,
+                 updated_at = NOW()`,
+              [
+                d.id,
+                d.tradeId,
+                d.symbol,
+                d.buyerUserId,
+                d.sellerUserId,
+                d.price,
+                d.qty,
+                d.amount,
+                d.status,
+                d.meetupLocation || 'Campus SAC / Student Activity Centre',
+                d.pickupOtp || null,
+              ]
+            );
+          }
         }
 
         for (const ev of batch.auditEvents) {
